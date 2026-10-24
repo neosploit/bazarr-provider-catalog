@@ -170,11 +170,13 @@ def parse_download_form(body):
     }
 
 
-class DownloadLimitExceeded(Exception):
+class APIThrottled(Exception):
     """subs4free refused the download because of its anti-flood penalty.
 
-    The worker maps this class name onto the host's DownloadLimitExceeded, so Bazarr+
-    pauses the provider instead of retrying a download the site will keep refusing.
+    The penalty is short (it cleared within minutes in live checks), so this is a rate
+    limit rather than a quota. The worker maps this class name onto the host's counted
+    APIThrottled: the provider sits out the current run, and repeated refusals pause it
+    for 10 minutes by default.
     """
 
 
@@ -185,7 +187,7 @@ def extract_download(body, payload=None):
     if not body or not body.strip():
         raise ValueError("subs4free returned an empty download")
     if _is_refused_download(body):
-        raise DownloadLimitExceeded(
+        raise APIThrottled(
             "subs4free refused the download: the site's anti-flood penalty is active for this IP"
         )
     if _is_html_body(body):
