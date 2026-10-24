@@ -3,8 +3,12 @@ import hashlib
 import importlib.util
 import io
 import unittest
+import urllib.error
+import urllib.parse
 import zipfile
+from http.cookiejar import Cookie
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 PROVIDER_DIR = ROOT / "providers" / "subs4free"
@@ -23,6 +27,8 @@ def _load_provider_module():
 SEARCH_HTML = (FIXTURE_DIR / "subs4free_search_inception.html").read_bytes()
 SUGGESTIONS_HTML = (FIXTURE_DIR / "subs4free_suggestions.html").read_bytes()
 DOWNLOAD_HTML = (FIXTURE_DIR / "subs4free_download_page.html").read_bytes()
+# Live Anubis v1.26.2 challenge page, trimmed to its Anubis parts; X-Real-Ip replaced.
+CHALLENGE_HTML = (FIXTURE_DIR / "subs4free_anubis_challenge.html").read_bytes()
 
 
 def _zip_body():
@@ -598,6 +604,133 @@ class Subs4FreeProviderTests(unittest.TestCase):
             )
         # A refusal is not retried: the site would only extend the penalty.
         self.assertEqual(len(posts), 1)
+
+
+def _anubis_auth_cookie(host="www.subs4free.info"):
+    return Cookie(0, "techaro.lol-anubis-auth", "token", None, False, host, False, False,
+                  "/", True, True, None, False, None, None, {})
+
+
+class Subs4FreeAnubisTests(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_provider_module()
+        patcher = mock.patch.object(self.mod.time, "sleep")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_extracts_live_challenge_page(self):
+        challenge = self.mod._extract_anubis_challenge(CHALLENGE_HTML.decode())
+        self.assertEqual(challenge["method"], "fast")
+        self.assertEqual(challenge["difficulty"], 4)
+        self.assertEqual(challenge["id"], "01a16d54-5362-7b86-8e31-d25676e44c1e")
+        self.assertTrue(self.mod._is_anubis_response("https://www.subs4free.info/", 200, CHALLENGE_HTML))
+        self.assertFalse(self.mod._is_anubis_response("https://www.subs4free.info/", 200, SEARCH_HTML))
+
+    def test_extract_reads_rules_when_challenge_omits_them(self):
+        page = (
+            '<script id="anubis_challenge" type="application/json">'
+            '{"rules":{"algorithm":"slow","difficulty":2},"challenge":{"id":"a","randomData":"b"}}</script>'
+        )
+        challenge = self.mod._extract_anubis_challenge(page)
+        self.assertEqual((challenge["method"], challenge["difficulty"]), ("slow", 2))
+
+    def test_proof_of_work_meets_difficulty(self):
+        nonce, digest = self.mod._solve_pow("abc", 4)
+        self.assertEqual(digest, hashlib.sha256(f"abc{nonce}".encode()).hexdigest())
+        self.assertTrue(digest.startswith("0000"))
+
+    def test_get_solves_challenge_then_refetches(self):
+        provider = self.mod.Subs4FreeProvider()
+        calls = []
+        url = "https://www.subs4free.info/search_report.php?search=Inception&searchType=1"
+
+        def fetch(request, timeout, opener=None):
+            del timeout
+            calls.append(request.full_url)
+            if "pass-challenge" in request.full_url:
+                # The pass endpoint is called without following its redirect.
+                self.assertIs(opener, provider._pass_opener)
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(request.full_url).query)
+                self.assertEqual(query["redir"], ["/search_report.php?search=Inception&searchType=1"])
+                self.assertTrue(query["response"][0].startswith("0000"))
+                provider._cookie_jar.set_cookie(_anubis_auth_cookie())
+                return 302, request.full_url, b""
+            return 200, url, CHALLENGE_HTML if len(calls) == 1 else SEARCH_HTML
+
+        provider._fetch = fetch
+        self.assertEqual(provider._http_get(url), SEARCH_HTML)
+        self.assertEqual(len(calls), 3)
+
+    def test_post_is_resent_after_challenge(self):
+        provider = self.mod.Subs4FreeProvider()
+        methods = []
+        detail = "https://www.subs4free.info/greek-subtitles/abc/inception"
+
+        def fetch(request, timeout, opener=None):
+            del timeout, opener
+            methods.append(request.get_method())
+            if "pass-challenge" in request.full_url:
+                # A challenged POST sends the pass endpoint back to the form's page.
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(request.full_url).query)
+                self.assertEqual(query["redir"], ["/greek-subtitles/abc/inception"])
+                provider._cookie_jar.set_cookie(_anubis_auth_cookie())
+                return 302, request.full_url, b""
+            if len(methods) == 1:
+                return 200, request.full_url, CHALLENGE_HTML
+            self.assertEqual(request.data, b"id=1&x=2&y=3")
+            return 200, request.full_url, b"PK-archive"
+
+        provider._fetch = fetch
+        body = provider._http_post(self.mod.DOWNLOAD_URL, {"id": "1", "x": "2", "y": "3"}, referer=detail)
+        self.assertEqual(body, b"PK-archive")
+        self.assertEqual(methods, ["POST", "GET", "POST"])
+
+    def test_failed_solves_renew_identity_then_raise(self):
+        provider = self.mod.Subs4FreeProvider()
+        jars = []
+
+        def fetch(request, timeout, opener=None):
+            del timeout, opener
+            if provider._cookie_jar not in jars:
+                jars.append(provider._cookie_jar)
+            if "pass-challenge" in request.full_url:
+                return 403, request.full_url, b"denied"
+            return 200, request.full_url, CHALLENGE_HTML
+
+        provider._fetch = fetch
+        with self.assertRaises(self.mod.ServiceUnavailable):
+            provider._http_get("https://www.subs4free.info/")
+        self.assertEqual(len(jars), self.mod.CHALLENGE_RETRY_ATTEMPTS)
+
+    def test_off_site_gate_keeps_the_site_identity(self):
+        # A failed gate on subs4series.com (the anti-block calls) must not wipe the
+        # subs4free.info clearance cookie.
+        provider = self.mod.Subs4FreeProvider()
+        jar = provider._cookie_jar
+
+        def fetch(request, timeout, opener=None):
+            del timeout, opener
+            if "pass-challenge" in request.full_url:
+                return 403, request.full_url, b""
+            return 200, request.full_url, CHALLENGE_HTML
+
+        provider._fetch = fetch
+        with self.assertRaises(self.mod.ServiceUnavailable):
+            provider._http_get("https://www.subs4series.com/includes/anti-block.php")
+        self.assertIs(provider._cookie_jar, jar)
+
+    def test_rate_limit_raises(self):
+        provider = self.mod.Subs4FreeProvider()
+        provider._fetch = lambda request, timeout, opener=None: (429, request.full_url, b"")
+        with self.assertRaises(self.mod.RateLimited):
+            provider._http_get("https://www.subs4free.info/")
+
+    def test_plain_http_error_is_not_a_provider_throttle(self):
+        provider = self.mod.Subs4FreeProvider()
+        provider._fetch = lambda request, timeout, opener=None: (404, request.full_url, b"Not Found")
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            provider._http_get("https://www.subs4free.info/greek-subtitles/missing/x")
+        self.assertEqual(raised.exception.code, 404)
 
 
 if __name__ == "__main__":

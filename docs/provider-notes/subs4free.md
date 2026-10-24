@@ -14,6 +14,7 @@
 ## Compatibility quirks
 
 - Bazarr labels this provider as broken for some users, so live checks must prove both search and download before promotion.
+- The site sits behind Anubis (v1.26.2 as of 2026-10-24), itself behind Cloudflare. Every page answers `200` with a proof-of-work challenge until the session holds a `*-anubis-auth` cookie. The worker solves it inline with the stdlib (`fast`/`slow` SHA-256, `preact`, `metarefresh`) and refetches. On a failed solve it renews the browser identity, up to three attempts. subs4series.com, which the anti-block calls touch, runs its own Anubis gate.
 - Search may return direct `.movie-details` result cards or a `Mov_sel` dropdown of matching movie pages.
 - Result language is carried by `elgif` and `engif` sprite classes, plus language-specific URL paths.
 - Download detail pages expose a hidden `id` field and an image submit button. The worker posts that id with generated `x` and `y` click coordinates to `/getSub.php`.
@@ -24,6 +25,8 @@
 ## Live notes
 
 Live verification on 2026-05-31 reached `https://www.subs4free.info/` through Cloudflare and returned HTTP `200`. Search for `Inception` returned current `movie-details` result cards with Greek subtitle rows, uploader names, download counts, and download detail links.
+
+Live verification on 2026-10-24: without the Anubis gate, 0.1.5 returned no results, because every search page was the challenge. With 0.2.0, searches for five movies returned Greek and English rows. Twelve downloads were spaced 5 to 120 seconds apart and eleven were granted; the refused one cleared within five minutes.
 
 ## License notes
 

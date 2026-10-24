@@ -4,10 +4,13 @@ import base64
 import hashlib
 import html
 import io
+import json
+import logging
 import random
 import re
 import time
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -16,8 +19,12 @@ from http.cookiejar import CookieJar
 import ua_generator
 from ua_generator.options import Options
 
+logger = logging.getLogger(__name__)
+
 PROVIDER_ID = "subs4free"
 BASE_URL = "https://www.subs4free.info"
+# Registrable host of the site, used to decide which failed gates may renew the identity.
+_SITE_DOMAIN = "subs4free.info"
 SEARCH_URL = f"{BASE_URL}/search_report.php"
 DOWNLOAD_URL = f"{BASE_URL}/getSub.php"
 ANTI_BLOCK_URLS = (
@@ -26,6 +33,13 @@ ANTI_BLOCK_URLS = (
     "https://www.subs4series.com/includes/anti-block.php",
 )
 HTTP_TIMEOUT_SECONDS = 15
+# subs4free.info sits behind Anubis (itself behind Cloudflare). Every page answers 200 with
+# a proof-of-work challenge until the session holds a *-anubis-auth cookie. Solve inline,
+# and on a failed solve renew the browser identity (UA + cookies) before trying again.
+CHALLENGE_RETRY_ATTEMPTS = 3
+ANUBIS_SOLVE_BUDGET_SECONDS = 30
+RETRY_BACKOFF_SECONDS = 0.5
+ANUBIS_PASS_PATH = "/.within.website/x/cmd/anubis/api/pass-challenge"
 MAX_CANDIDATES_PER_QUERY = 20
 SUPPORTED_LANGUAGES = {
     "ell": "el",
@@ -57,6 +71,17 @@ _ID_INPUT_RE = re.compile(
 )
 _IMAGE_INPUT_RE = re.compile(
     r"<input\b(?=[^>]*\btype=[\"']image[\"'])[^>]*>",
+    re.I | re.S,
+)
+_META_REFRESH_RE = re.compile(
+    r"""<meta\s+http-equiv=["']refresh["']\s+content=["'](?P<delay>\d+);\s*url=(?P<url>[^"']+)["']""",
+    re.I,
+)
+_ANUBIS_CHALLENGE_MARKER_RE = re.compile(
+    r"""<script\b[^>]*\bid\s*=\s*["']anubis_challenge["']""", re.I
+)
+_ANUBIS_CHALLENGE_RE = re.compile(
+    r"""<script\s+id=["']anubis_challenge["'][^>]*>\s*(?P<json>.*?)\s*</script>""",
     re.I | re.S,
 )
 # getSub.php answers a flagged client with "Refresh timorias [1]" or "Polla alla isxiei
@@ -302,16 +327,132 @@ def compute_score(video, item):
     return 60
 
 
+class Subs4FreeError(RuntimeError):
+    """Base class for Subs4Free failures."""
+
+
+class RateLimited(Subs4FreeError):
+    """The upstream service asked the caller to slow down."""
+
+
+class ServiceUnavailable(Subs4FreeError):
+    """The upstream service is not currently usable."""
+
+
+def is_anubis_challenge(url, status_code=0):
+    return "/.within.website/" in (url or "") or (
+        status_code in (307, 401, 403) and ".within.website" in (url or "")
+    )
+
+
+def _extract_anubis_challenge(html_text):
+    meta_match = _META_REFRESH_RE.search(html_text or "")
+    if meta_match and "/.within.website/" in meta_match.group("url"):
+        return {
+            "method": "metarefresh",
+            "redirect_url": html.unescape(meta_match.group("url")),
+            "delay": int(meta_match.group("delay")),
+            "difficulty": 0,
+        }
+    match = _ANUBIS_CHALLENGE_RE.search(html_text or "")
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group("json"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    challenge = data.get("challenge")
+    if not isinstance(challenge, dict) or "randomData" not in challenge or "id" not in challenge:
+        return None
+    if any(not isinstance(challenge[key], str) or not challenge[key] for key in ("id", "randomData")):
+        return None
+    # Anubis >= 1.2x also publishes the policy under "rules"; older builds only carry the
+    # values on the challenge itself.
+    rules = data.get("rules") if isinstance(data.get("rules"), dict) else {}
+    try:
+        difficulty = int(challenge.get("difficulty", rules.get("difficulty", 4)))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if difficulty < 0:
+        return None
+    return {
+        "id": challenge["id"],
+        "randomData": challenge["randomData"],
+        "difficulty": difficulty,
+        "method": challenge.get("method") or rules.get("algorithm") or "fast",
+    }
+
+
+def _solve_pow(random_data, difficulty, deadline=None):
+    prefix = "0" * difficulty
+    nonce = 0
+    while True:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise ServiceUnavailable("subs4free Anubis proof-of-work timed out")
+        digest = hashlib.sha256(f"{random_data}{nonce}".encode("utf-8")).hexdigest()
+        if digest.startswith(prefix):
+            return nonce, digest
+        nonce += 1
+
+
+def _solve_preact(random_data, difficulty):
+    return hashlib.sha256(random_data.encode("utf-8")).hexdigest(), difficulty * 0.125
+
+
+def _is_anubis_response(url, status_code, body):
+    text = _decode(body[:65536] if isinstance(body, bytes) else body)
+    return bool(
+        is_anubis_challenge(url, status_code)
+        or _ANUBIS_CHALLENGE_MARKER_RE.search(text)
+        or _extract_anubis_challenge(text)
+    )
+
+
+def _is_site_url(url):
+    host = (urllib.parse.urlparse(url or "").hostname or "").lower()
+    return host == _SITE_DOMAIN or host.endswith(f".{_SITE_DOMAIN}")
+
+
+def _remaining(deadline, stage):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ServiceUnavailable(f"subs4free Anubis stage={stage} budget_exhausted")
+    return remaining
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    # The pass endpoint answers 302 with the auth cookie. Keep that response (the cookie
+    # processor has already stored the cookie) instead of following it to the resource.
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class Subs4FreeProvider:
     def __init__(self):
-        self._user_agent = ua_generator.generate(
-            device="desktop",
-            platform=("linux", "windows"),
-            browser=("firefox", "chrome"),
-            options=Options(latest_versions=True),
-        ).text
+        self._user_agent = None
+        self._new_identity()
+
+    def _new_identity(self):
+        # A rejected identity includes its browser header and cookies. Keep the next
+        # attempt isolated instead of replaying either half of that pair.
+        previous = self._user_agent
+        user_agent = previous
+        for _ in range(3):
+            user_agent = ua_generator.generate(
+                device="desktop",
+                platform=("linux", "windows"),
+                browser=("firefox", "chrome"),
+                options=Options(latest_versions=True),
+            ).text
+            if user_agent != previous:
+                break
+        self._user_agent = user_agent
         self._cookie_jar = CookieJar()
-        self._opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self._cookie_jar))
+        cookies = urllib.request.HTTPCookieProcessor(self._cookie_jar)
+        self._opener = urllib.request.build_opener(cookies)
+        self._pass_opener = urllib.request.build_opener(cookies, _NoRedirect())
 
     def search(self, video, languages, config):
         if (video or {}).get("kind") != "movie":
@@ -417,17 +558,139 @@ class Subs4FreeProvider:
                 continue
 
     def _http_get(self, url, timeout=HTTP_TIMEOUT_SECONDS, referer=None):
-        request = urllib.request.Request(url, headers=_headers(self._user_agent, referer))
-        with self._opener.open(request, timeout=timeout) as response:
-            return response.read()
+        def build():
+            return urllib.request.Request(url, headers=_headers(self._user_agent, referer))
+
+        return self._open_with_anubis(build, url, timeout)
 
     def _http_post(self, url, data, timeout=HTTP_TIMEOUT_SECONDS, referer=None):
         encoded = urllib.parse.urlencode(data).encode("utf-8")
-        headers = _headers(self._user_agent, referer)
-        headers["Content-Type"] = "application/x-www-form-urlencoded"
-        request = urllib.request.Request(url, data=encoded, headers=headers, method="POST")
-        with self._opener.open(request, timeout=timeout) as response:
-            return response.read()
+
+        def build():
+            headers = _headers(self._user_agent, referer)
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            return urllib.request.Request(url, data=encoded, headers=headers, method="POST")
+
+        # A POST interrupted by a challenge is re-sent once the gate clears; the pass
+        # endpoint redirects back to the page the form lives on.
+        return self._open_with_anubis(build, url, timeout, redir_url=referer)
+
+    def _fetch(self, request, timeout, opener=None):
+        # Return error bodies too: a gate can ride on a 401/403 and must still be read.
+        try:
+            with (opener or self._opener).open(request, timeout=timeout) as response:
+                return response.getcode(), response.geturl(), response.read()
+        except urllib.error.HTTPError as error:
+            try:
+                body = error.read()
+            except Exception:
+                body = b""
+            return error.code, error.geturl() or request.full_url, body
+
+    def _open_with_anubis(self, build_request, url, timeout, redir_url=None):
+        # Only the subs4free.info identity is renewed on a failed solve. A gate on another
+        # host (the best-effort anti-block calls) must not wipe the site's clearance cookie.
+        attempts = CHALLENGE_RETRY_ATTEMPTS if _is_site_url(url) else 1
+        for attempt in range(1, attempts + 1):
+            status, landed, body = self._fetch(build_request(), timeout)
+            if status == 429:
+                raise RateLimited("subs4free rate limited the request")
+            if _is_anubis_response(landed, status, body):
+                if self._solve_anubis(landed or url, redir_url or url, body, timeout):
+                    status, landed, body = self._fetch(build_request(), timeout)
+                    if status == 429:
+                        raise RateLimited("subs4free rate limited the request")
+            if not _is_anubis_response(landed, status, body):
+                if status >= 400:
+                    # Same failure as before the gate: an ordinary HTTP error, not a
+                    # provider-wide throttle.
+                    raise urllib.error.HTTPError(landed or url, status, f"subs4free HTTP {status}", None, None)
+                return body
+            logger.warning("subs4free Anubis stage=recovery attempt=%s/%s status=%s", attempt, attempts, status)
+            if attempt < attempts:
+                self._new_identity()
+                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+        raise ServiceUnavailable(f"subs4free Anubis challenge could not be solved after {attempts} attempts")
+
+    def _solve_anubis(self, challenge_url, original_url, body, timeout):
+        started = time.monotonic()
+        deadline = started + ANUBIS_SOLVE_BUDGET_SECONDS
+        parsed = urllib.parse.urlparse(challenge_url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        original = urllib.parse.urlparse(original_url)
+        original_target = urllib.parse.urlunparse(("", "", original.path or "/", original.params, original.query, ""))
+        redir = urllib.parse.parse_qs(parsed.query).get("redir", [original_target])[0]
+        challenge = _extract_anubis_challenge(_decode(body))
+        if not challenge and "/.within.website/" in challenge_url:
+            # Redirected to a challenge page without the inline payload: fetch it once.
+            _, _, page = self._fetch(self._anubis_request(challenge_url, original_url), min(timeout, _remaining(deadline, "challenge_fetch")))
+            challenge = _extract_anubis_challenge(_decode(page))
+        if not challenge:
+            logger.warning("subs4free Anubis stage=challenge_parse")
+            return False
+
+        method = challenge["method"]
+        if method == "metarefresh":
+            pass_url = urllib.parse.urljoin(base + "/", challenge["redirect_url"])
+            delay = challenge.get("delay", 1)
+            if delay >= _remaining(deadline, "pass_submit"):
+                return False
+            time.sleep(delay)
+        elif method == "preact":
+            result, delay = _solve_preact(challenge["randomData"], challenge["difficulty"])
+            if delay > 0:
+                if delay >= _remaining(deadline, "pass_submit"):
+                    return False
+                time.sleep(delay)
+            params = {
+                "id": challenge["id"],
+                "result": result,
+                "redir": redir,
+                "elapsedTime": str(int((time.monotonic() - started) * 1000)),
+            }
+            pass_url = f"{base}{ANUBIS_PASS_PATH}?{urllib.parse.urlencode(params)}"
+        else:
+            try:
+                nonce, digest = _solve_pow(challenge["randomData"], challenge["difficulty"], deadline=deadline)
+            except ServiceUnavailable:
+                logger.warning("subs4free Anubis stage=proof_of_work timed_out")
+                return False
+            params = {
+                "id": challenge["id"],
+                "response": digest,
+                "nonce": str(nonce),
+                "redir": redir,
+                "elapsedTime": str(int((time.monotonic() - started) * 1000)),
+            }
+            pass_url = f"{base}{ANUBIS_PASS_PATH}?{urllib.parse.urlencode(params)}"
+
+        status, _, _ = self._fetch(
+            self._anubis_request(pass_url, original_url),
+            min(timeout, _remaining(deadline, "pass_submit")),
+            opener=self._pass_opener,
+        )
+        if status == 429:
+            raise RateLimited("subs4free rate limited the Anubis request")
+        if not 200 <= status < 400:
+            logger.warning("subs4free Anubis stage=pass_status status=%s", status)
+            return False
+        if not self._has_anubis_auth(parsed.hostname):
+            logger.warning("subs4free Anubis stage=auth_cookie status=%s", status)
+            return False
+        return True
+
+    def _anubis_request(self, url, referer):
+        return urllib.request.Request(url, headers=_headers(self._user_agent, referer))
+
+    def _has_anubis_auth(self, host):
+        host = (host or "").lower()
+        for cookie in self._cookie_jar:
+            if not cookie.name.endswith("-anubis-auth") or not cookie.value or cookie.is_expired():
+                continue
+            domain = (cookie.domain or "").lstrip(".").lower()
+            if not domain or host == domain or host.endswith(f".{domain}"):
+                return True
+        return False
 
 
 def _search_url(query):
