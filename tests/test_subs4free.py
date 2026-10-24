@@ -296,6 +296,28 @@ class Subs4FreeParserTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.mod.extract_download(body, {"filename": "inception.el.zip"})
 
+    def test_extract_download_reports_penalty_bodies_as_download_limit(self):
+        # The two bodies getSub.php sent with its 302 while the anti-flood penalty was active.
+        for body in (b"Refresh timorias [1]<BR>", b"Polla alla isxiei timoria...<BR>"):
+            with self.subTest(body=body):
+                with self.assertRaises(self.mod.DownloadLimitExceeded):
+                    self.mod.extract_download(body, {"filename": "inception.el.zip"})
+
+    def test_extract_download_reports_bounce_to_detail_page_as_download_limit(self):
+        # Following the refusal's 302 lands back on the detail page with its getSub.php form.
+        with self.assertRaises(self.mod.DownloadLimitExceeded) as raised:
+            self.mod.extract_download(DOWNLOAD_HTML, {"filename": "inception.el.zip"})
+        # The worker maps the remote class name onto the host's DownloadLimitExceeded.
+        self.assertEqual(type(raised.exception).__name__, "DownloadLimitExceeded")
+
+    def test_extract_download_keeps_subtitles_that_quote_the_penalty_word(self):
+        body = b"1\r\n00:00:01,000 --> 00:00:02,000\r\nH timoria\r\n\r\n" + b"x" * 600
+        payload = self.mod.extract_download(body, {"filename": "inception.el.srt"})
+        self.assertIn("content_b64", payload)
+        archive = _zip_body_with("Refresh.timorias.srt", "timoria")
+        payload = self.mod.extract_download(archive, {"filename": "inception.el.zip"})
+        self.assertEqual(base64.b64decode(payload["archive_b64"]), archive)
+
 
 class Subs4FreeProviderTests(unittest.TestCase):
     def setUp(self):
@@ -547,6 +569,35 @@ class Subs4FreeProviderTests(unittest.TestCase):
         self.assertIsNone(result["episode"])
         self.assertNotIn("content_b64", result)
         self.assertNotIn("encoding", result)
+
+    def test_download_refused_by_penalty_raises_download_limit_once(self):
+        provider = self.mod.Subs4FreeProvider()
+        posts = []
+
+        def get_stub(url, timeout=15, referer=None):
+            del timeout, referer
+            return DOWNLOAD_HTML if "greek-subtitles" in url else b"ok"
+
+        def post_stub(url, data, timeout=15, referer=None):
+            del timeout, referer
+            posts.append(url)
+            # urllib follows the refusal's 302 back to the detail page.
+            return DOWNLOAD_HTML
+
+        provider._http_get = get_stub
+        provider._http_post = post_stub
+        with self.assertRaises(self.mod.DownloadLimitExceeded):
+            provider.download(
+                {
+                    "detail_url": "https://www.subs4free.info/greek-subtitles/s3591aab93d/inception",
+                    "filename": "inception.el.zip",
+                    "episode": None,
+                },
+                {"alpha3": "ell", "alpha2": "el"},
+                {"request_delay_ms": 0},
+            )
+        # A refusal is not retried: the site would only extend the penalty.
+        self.assertEqual(len(posts), 1)
 
 
 if __name__ == "__main__":

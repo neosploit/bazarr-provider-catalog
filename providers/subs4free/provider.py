@@ -59,6 +59,10 @@ _IMAGE_INPUT_RE = re.compile(
     r"<input\b(?=[^>]*\btype=[\"']image[\"'])[^>]*>",
     re.I | re.S,
 )
+# getSub.php answers a flagged client with "Refresh timorias [1]" or "Polla alla isxiei
+# timoria..." (Greeklish for "punishment"): an anti-flood penalty on the client IP.
+_PENALTY_RE = re.compile(rb"timori", re.I)
+_PENALTY_BODY_MAX_BYTES = 512
 _YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
 _NON_ALNUM_RE = re.compile(r"[\W_]+", re.UNICODE)
 
@@ -141,12 +145,24 @@ def parse_download_form(body):
     }
 
 
+class DownloadLimitExceeded(Exception):
+    """subs4free refused the download because of its anti-flood penalty.
+
+    The worker maps this class name onto the host's DownloadLimitExceeded, so Bazarr+
+    pauses the provider instead of retrying a download the site will keep refusing.
+    """
+
+
 def extract_download(body, payload=None):
     payload = payload or {}
     # Reject broken responses: getSub.php can answer with an empty stream or an HTML/error
     # page that otherwise looks like a successful download.
     if not body or not body.strip():
         raise ValueError("subs4free returned an empty download")
+    if _is_refused_download(body):
+        raise DownloadLimitExceeded(
+            "subs4free refused the download: the site's anti-flood penalty is active for this IP"
+        )
     if _is_html_body(body):
         raise ValueError("subs4free returned an HTML/error page instead of a subtitle")
     if _is_archive_body(body):
@@ -220,6 +236,21 @@ def _member_release_score(name, release_tokens):
 
 def _is_archive_body(body):
     return _is_rar_archive(body) or zipfile.is_zipfile(io.BytesIO(body or b""))
+
+
+def _is_refused_download(body):
+    # A refused download is a 302 from getSub.php back to the subtitle's detail page. Its
+    # short body names the penalty; once the redirect is followed the response is that
+    # detail page, which still carries the getSub.php form. Archives are never refusals,
+    # and the penalty word only counts in a short body, so a subtitle quoting it is safe.
+    if _is_archive_body(body):
+        return False
+    if len(body) <= _PENALTY_BODY_MAX_BYTES and _PENALTY_RE.search(body):
+        return True
+    if not _is_html_body(body):
+        return False
+    text = _decode(body)
+    return "getSub.php" in text and _ID_INPUT_RE.search(text) is not None
 
 
 def _is_html_body(body):
