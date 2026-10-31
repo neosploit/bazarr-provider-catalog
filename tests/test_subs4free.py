@@ -719,6 +719,86 @@ class Subs4FreeAnubisTests(unittest.TestCase):
             provider._http_get("https://www.subs4series.com/includes/anti-block.php")
         self.assertIs(provider._cookie_jar, jar)
 
+    def test_failed_gate_on_images_host_keeps_the_site_identity(self):
+        # images.subs4free.info is the first anti-block call. Renewing the identity there
+        # would wipe the www clearance cookie right before the getSub.php POST, which would
+        # then bounce to the detail page and read as the anti-flood penalty.
+        provider = self.mod.Subs4FreeProvider()
+        provider._cookie_jar.set_cookie(_anubis_auth_cookie())
+        jar = provider._cookie_jar
+        pages = []
+
+        def fetch(request, timeout, opener=None):
+            del timeout, opener
+            if "pass-challenge" in request.full_url:
+                return 403, request.full_url, b""
+            pages.append(request.full_url)
+            return 200, request.full_url, CHALLENGE_HTML
+
+        provider._fetch = fetch
+        with self.assertRaises(self.mod.ServiceUnavailable):
+            provider._http_get(self.mod.ANTI_BLOCK_URLS[0])
+        self.assertIs(provider._cookie_jar, jar)
+        self.assertTrue(provider._has_anubis_auth("www.subs4free.info"))
+        self.assertEqual(len(pages), 1)
+
+    def test_only_the_www_host_renews_the_identity(self):
+        self.assertTrue(self.mod._renews_identity("https://www.subs4free.info/getSub.php"))
+        for url in (
+            "https://images.subs4free.info/favicon.ico",
+            "https://subs4free.info/",
+            "https://www.subs4series.com/includes/anti-block.php",
+            "https://www.subs4free.info.example.com/",
+        ):
+            with self.subTest(url=url):
+                self.assertFalse(self.mod._renews_identity(url))
+
+    def test_proof_of_work_budget_exhaustion_aborts_without_retry(self):
+        # A new identity cannot make the proof of work cheaper: running out of budget
+        # mid-solve ends the call at once, with no renewal and no pass submission.
+        self.mod.SITE_CALL_BUDGET_SECONDS = 0.2
+        hard = CHALLENGE_HTML.replace(b'"difficulty":4', b'"difficulty":40')
+        provider = self.mod.Subs4FreeProvider()
+        jar = provider._cookie_jar
+        calls = []
+
+        def fetch(request, timeout, opener=None):
+            del timeout, opener
+            calls.append(request.full_url)
+            return 200, request.full_url, hard
+
+        provider._fetch = fetch
+        with self.assertRaises(self.mod.ServiceUnavailable) as raised:
+            provider._http_get("https://www.subs4free.info/")
+        self.assertIn("proof_of_work budget_exhausted", str(raised.exception))
+        self.assertEqual(calls, ["https://www.subs4free.info/"])
+        self.assertIs(provider._cookie_jar, jar)
+
+    def test_attempts_share_one_call_budget(self):
+        # Every fetch "takes" 20 s on a fake clock and the pass endpoint keeps refusing.
+        # The call must stop at the 60 s budget instead of running three full attempts,
+        # and every request timeout must fit what is left of it.
+        clock = [1000.0]
+        timeouts = []
+        provider = self.mod.Subs4FreeProvider()
+
+        def fetch(request, timeout, opener=None):
+            del opener
+            timeouts.append((timeout, 1000.0 + self.mod.SITE_CALL_BUDGET_SECONDS - clock[0]))
+            clock[0] += 20
+            if "pass-challenge" in request.full_url:
+                return 403, request.full_url, b""
+            return 200, request.full_url, CHALLENGE_HTML
+
+        provider._fetch = fetch
+        with mock.patch.object(self.mod.time, "monotonic", lambda: clock[0]):
+            with self.assertRaises(self.mod.ServiceUnavailable) as raised:
+                provider._http_get("https://www.subs4free.info/")
+        self.assertIn("budget_exhausted", str(raised.exception))
+        self.assertLessEqual(clock[0] - 1000.0, self.mod.SITE_CALL_BUDGET_SECONDS)
+        for timeout, left in timeouts:
+            self.assertLessEqual(timeout, left)
+
     def test_rate_limit_raises(self):
         provider = self.mod.Subs4FreeProvider()
         provider._fetch = lambda request, timeout, opener=None: (429, request.full_url, b"")

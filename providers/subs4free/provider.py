@@ -23,8 +23,9 @@ logger = logging.getLogger(__name__)
 
 PROVIDER_ID = "subs4free"
 BASE_URL = "https://www.subs4free.info"
-# Registrable host of the site, used to decide which failed gates may renew the identity.
-_SITE_DOMAIN = "subs4free.info"
+# The host whose Anubis clearance cookie the search, detail and getSub.php calls need.
+# Only a failed gate here renews the identity; other subs4free.info hosts do not.
+_SITE_HOST = urllib.parse.urlparse(BASE_URL).hostname
 SEARCH_URL = f"{BASE_URL}/search_report.php"
 DOWNLOAD_URL = f"{BASE_URL}/getSub.php"
 ANTI_BLOCK_URLS = (
@@ -37,7 +38,9 @@ HTTP_TIMEOUT_SECONDS = 15
 # a proof-of-work challenge until the session holds a *-anubis-auth cookie. Solve inline,
 # and on a failed solve renew the browser identity (UA + cookies) before trying again.
 CHALLENGE_RETRY_ATTEMPTS = 3
-ANUBIS_SOLVE_BUDGET_SECONDS = 30
+# One site call, all attempts, solves and backoff included, stays well inside the host's
+# 120 s worker timeout. Running out aborts the call; it is never retried.
+SITE_CALL_BUDGET_SECONDS = 60
 RETRY_BACKOFF_SECONDS = 0.5
 ANUBIS_PASS_PATH = "/.within.website/x/cmd/anubis/api/pass-challenge"
 MAX_CANDIDATES_PER_QUERY = 20
@@ -392,7 +395,7 @@ def _solve_pow(random_data, difficulty, deadline=None):
     nonce = 0
     while True:
         if deadline is not None and time.monotonic() >= deadline:
-            raise ServiceUnavailable("subs4free Anubis proof-of-work timed out")
+            raise ServiceUnavailable("subs4free Anubis stage=proof_of_work budget_exhausted")
         digest = hashlib.sha256(f"{random_data}{nonce}".encode("utf-8")).hexdigest()
         if digest.startswith(prefix):
             return nonce, digest
@@ -412,9 +415,8 @@ def _is_anubis_response(url, status_code, body):
     )
 
 
-def _is_site_url(url):
-    host = (urllib.parse.urlparse(url or "").hostname or "").lower()
-    return host == _SITE_DOMAIN or host.endswith(f".{_SITE_DOMAIN}")
+def _renews_identity(url):
+    return (urllib.parse.urlparse(url or "").hostname or "").lower() == _SITE_HOST
 
 
 def _remaining(deadline, stage):
@@ -422,6 +424,16 @@ def _remaining(deadline, stage):
     if remaining <= 0:
         raise ServiceUnavailable(f"subs4free Anubis stage={stage} budget_exhausted")
     return remaining
+
+
+def _request_timeout(timeout, deadline, stage):
+    return min(timeout, _remaining(deadline, stage))
+
+
+def _budget_sleep(seconds, deadline, stage):
+    if seconds >= _remaining(deadline, stage):
+        raise ServiceUnavailable(f"subs4free Anubis stage={stage} budget_exhausted")
+    time.sleep(seconds)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -590,16 +602,23 @@ class Subs4FreeProvider:
             return error.code, error.geturl() or request.full_url, body
 
     def _open_with_anubis(self, build_request, url, timeout, redir_url=None):
-        # Only the subs4free.info identity is renewed on a failed solve. A gate on another
-        # host (the best-effort anti-block calls) must not wipe the site's clearance cookie.
-        attempts = CHALLENGE_RETRY_ATTEMPTS if _is_site_url(url) else 1
+        # Only a failed gate on www.subs4free.info renews the identity and retries. A gate
+        # on any other host (the best-effort anti-block calls, images.subs4free.info
+        # included) gets one attempt, so it can never wipe the clearance cookie the
+        # getSub.php POST needs. Running out of the call budget raises ServiceUnavailable
+        # from wherever it happens and is not retried: a new identity cannot make the
+        # proof of work cheaper.
+        deadline = time.monotonic() + SITE_CALL_BUDGET_SECONDS
+        attempts = CHALLENGE_RETRY_ATTEMPTS if _renews_identity(url) else 1
         for attempt in range(1, attempts + 1):
-            status, landed, body = self._fetch(build_request(), timeout)
+            status, landed, body = self._fetch(build_request(), _request_timeout(timeout, deadline, "resource_fetch"))
             if status == 429:
                 raise RateLimited("subs4free rate limited the request")
             if _is_anubis_response(landed, status, body):
-                if self._solve_anubis(landed or url, redir_url or url, body, timeout):
-                    status, landed, body = self._fetch(build_request(), timeout)
+                if self._solve_anubis(landed or url, redir_url or url, body, timeout, deadline):
+                    status, landed, body = self._fetch(
+                        build_request(), _request_timeout(timeout, deadline, "resource_refetch")
+                    )
                     if status == 429:
                         raise RateLimited("subs4free rate limited the request")
             if not _is_anubis_response(landed, status, body):
@@ -610,13 +629,14 @@ class Subs4FreeProvider:
                 return body
             logger.warning("subs4free Anubis stage=recovery attempt=%s/%s status=%s", attempt, attempts, status)
             if attempt < attempts:
+                _budget_sleep(RETRY_BACKOFF_SECONDS * attempt, deadline, "recovery_backoff")
                 self._new_identity()
-                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
         raise ServiceUnavailable(f"subs4free Anubis challenge could not be solved after {attempts} attempts")
 
-    def _solve_anubis(self, challenge_url, original_url, body, timeout):
+    def _solve_anubis(self, challenge_url, original_url, body, timeout, deadline):
+        # Returns False when the site rejects the solve (the caller may retry with a new
+        # identity). Budget exhaustion raises instead and ends the whole call.
         started = time.monotonic()
-        deadline = started + ANUBIS_SOLVE_BUDGET_SECONDS
         parsed = urllib.parse.urlparse(challenge_url)
         base = f"{parsed.scheme}://{parsed.netloc}"
         original = urllib.parse.urlparse(original_url)
@@ -625,7 +645,10 @@ class Subs4FreeProvider:
         challenge = _extract_anubis_challenge(_decode(body))
         if not challenge and "/.within.website/" in challenge_url:
             # Redirected to a challenge page without the inline payload: fetch it once.
-            _, _, page = self._fetch(self._anubis_request(challenge_url, original_url), min(timeout, _remaining(deadline, "challenge_fetch")))
+            _, _, page = self._fetch(
+                self._anubis_request(challenge_url, original_url),
+                _request_timeout(timeout, deadline, "challenge_fetch"),
+            )
             challenge = _extract_anubis_challenge(_decode(page))
         if not challenge:
             logger.warning("subs4free Anubis stage=challenge_parse")
@@ -634,16 +657,11 @@ class Subs4FreeProvider:
         method = challenge["method"]
         if method == "metarefresh":
             pass_url = urllib.parse.urljoin(base + "/", challenge["redirect_url"])
-            delay = challenge.get("delay", 1)
-            if delay >= _remaining(deadline, "pass_submit"):
-                return False
-            time.sleep(delay)
+            _budget_sleep(challenge.get("delay", 1), deadline, "pass_submit")
         elif method == "preact":
             result, delay = _solve_preact(challenge["randomData"], challenge["difficulty"])
             if delay > 0:
-                if delay >= _remaining(deadline, "pass_submit"):
-                    return False
-                time.sleep(delay)
+                _budget_sleep(delay, deadline, "pass_submit")
             params = {
                 "id": challenge["id"],
                 "result": result,
@@ -652,11 +670,7 @@ class Subs4FreeProvider:
             }
             pass_url = f"{base}{ANUBIS_PASS_PATH}?{urllib.parse.urlencode(params)}"
         else:
-            try:
-                nonce, digest = _solve_pow(challenge["randomData"], challenge["difficulty"], deadline=deadline)
-            except ServiceUnavailable:
-                logger.warning("subs4free Anubis stage=proof_of_work timed_out")
-                return False
+            nonce, digest = _solve_pow(challenge["randomData"], challenge["difficulty"], deadline=deadline)
             params = {
                 "id": challenge["id"],
                 "response": digest,
@@ -668,7 +682,7 @@ class Subs4FreeProvider:
 
         status, _, _ = self._fetch(
             self._anubis_request(pass_url, original_url),
-            min(timeout, _remaining(deadline, "pass_submit")),
+            _request_timeout(timeout, deadline, "pass_submit"),
             opener=self._pass_opener,
         )
         if status == 429:
