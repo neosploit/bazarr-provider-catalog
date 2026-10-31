@@ -532,7 +532,7 @@ class Subs4FreeProviderTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["release_info"], "1917 2019 1080p BluRay")
 
-    def test_download_posts_form_after_anti_block_requests(self):
+    def test_download_posts_form_straight_after_the_detail_page(self):
         provider = self.mod.Subs4FreeProvider()
         seen_gets = []
         posts = []
@@ -542,8 +542,6 @@ class Subs4FreeProviderTests(unittest.TestCase):
             seen_gets.append((url, referer))
             if url == "https://www.subs4free.info/greek-subtitles/s3591aab93d/inception":
                 return DOWNLOAD_HTML
-            if "anti-block" in url:
-                return b"ok"
             raise AssertionError(f"unexpected GET: {url}")
 
         archive = _zip_body()
@@ -568,10 +566,10 @@ class Subs4FreeProviderTests(unittest.TestCase):
         self.assertEqual(posts[0][0], "https://www.subs4free.info/getSub.php")
         self.assertEqual(posts[0][1]["id"], "tkMTc4MDI0MDQ5MTE4NTk1MjUxMTg2MTg5NjQ2MTg5")
         self.assertEqual(posts[0][2], "https://www.subs4free.info/greek-subtitles/s3591aab93d/inception")
-        anti_block = [url for url, _referer in seen_gets if "anti-block" in url]
-        self.assertEqual(anti_block, list(self.mod.ANTI_BLOCK_URLS))
-        # The favicon request is gone: images.subs4free.info is Anubis-gated and not needed.
-        self.assertFalse(any("images.subs4free.info" in url for url, _referer in seen_gets))
+        # No legacy anti-block calls (images.subs4free.info, subs4series.com): the only
+        # GET is the detail page, and the POST follows it directly.
+        self.assertEqual([url for url, _referer in seen_gets],
+                         ["https://www.subs4free.info/greek-subtitles/s3591aab93d/inception"])
         # Archive mode: download() forwards the raw archive bytes for host-side extraction.
         self.assertEqual(base64.b64decode(result["archive_b64"]), archive)
         self.assertEqual(result["archive_sha256"], hashlib.sha256(archive).hexdigest())
@@ -706,8 +704,8 @@ class Subs4FreeAnubisTests(unittest.TestCase):
         self.assertEqual(len(jars), self.mod.CHALLENGE_RETRY_ATTEMPTS)
 
     def test_off_site_gate_keeps_the_site_identity(self):
-        # A failed gate on subs4series.com (the anti-block calls) must not wipe the
-        # subs4free.info clearance cookie.
+        # A failed gate on a third-party host must not wipe the subs4free.info
+        # clearance cookie.
         provider = self.mod.Subs4FreeProvider()
         jar = provider._cookie_jar
 

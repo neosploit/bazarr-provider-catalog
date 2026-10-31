@@ -143,7 +143,7 @@ Browser-style providers generate a current desktop User-Agent once per provider 
 - `providers/subclub/`: scrapes Subclub.eu movie and episode subtitle listings and downloads.
 - `providers/subdl/`: uses the official SubDL API for movie and episode subtitles with optional anime pack handling, and can offer SubDL AI translations for missing languages with a Plus or Pro account, off by default.
 - `providers/subf2m/`: scrapes SubF2M movie and episode subtitle pages and ZIP downloads.
-- `providers/subs4free/`: scrapes Subs4Free movie subtitle listings and anti-block downloads, solving the site's Anubis challenge inline.
+- `providers/subs4free/`: scrapes Subs4Free movie subtitle listings and downloads, solving the site's Anubis challenge inline.
 - `providers/subs4series/`: scrapes Subs4Series episode subtitles with ai-cloudscraper, inline Anubis solving, optional FlareSolverr fallback, anti-block requests, optional captcha helper settings, and archive extraction.
 - `providers/subhd/`: scrapes SubHD.tv Chinese-first movie and episode subtitle pages.
 - `providers/subsarr/`: connects to a configured self-hosted Subsarr API.

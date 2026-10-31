@@ -28,12 +28,6 @@ BASE_URL = "https://www.subs4free.info"
 _SITE_HOST = urllib.parse.urlparse(BASE_URL).hostname
 SEARCH_URL = f"{BASE_URL}/search_report.php"
 DOWNLOAD_URL = f"{BASE_URL}/getSub.php"
-# The legacy sequence also fetched images.subs4free.info/favicon.ico. That host now sits
-# behind its own Anubis login gate, and downloads succeed without the request.
-ANTI_BLOCK_URLS = (
-    "https://www.subs4series.com/includes/anti-block-layover.php?launch=1",
-    "https://www.subs4series.com/includes/anti-block.php",
-)
 HTTP_TIMEOUT_SECONDS = 15
 # subs4free.info sits behind Anubis (itself behind Cloudflare). Every page answers 200 with
 # a proof-of-work challenge until the session holds a *-anubis-auth cookie. Solve inline,
@@ -501,7 +495,9 @@ class Subs4FreeProvider:
         _sleep(config)
         page = self._http_get(detail_url, referer=BASE_URL)
         form = parse_download_form(page)
-        self._apply_anti_block(detail_url, config)
+        # The legacy "anti-block" calls (images.subs4free.info and two subs4series.com
+        # pages) only detected ISP blocking for visitors in Greece; getSub.php does not
+        # depend on them, so the POST follows the detail page directly.
         post_data = {
             "id": form["id"],
             "x": str(random.randint(0, max(form["width"], 1))),
@@ -564,14 +560,6 @@ class Subs4FreeProvider:
             },
         }
 
-    def _apply_anti_block(self, detail_url, config):
-        for url in ANTI_BLOCK_URLS:
-            _sleep(config)
-            try:
-                self._http_get(url, referer=detail_url)
-            except Exception:
-                continue
-
     def _http_get(self, url, timeout=HTTP_TIMEOUT_SECONDS, referer=None):
         def build():
             return urllib.request.Request(url, headers=_headers(self._user_agent, referer))
@@ -604,9 +592,8 @@ class Subs4FreeProvider:
 
     def _open_with_anubis(self, build_request, url, timeout, redir_url=None):
         # Only a failed gate on www.subs4free.info renews the identity and retries. A gate
-        # on any other host (the best-effort subs4series.com anti-block calls, or another
-        # subs4free.info host) gets one attempt, so it can never wipe the clearance cookie
-        # the getSub.php POST needs. Running out of the call budget raises ServiceUnavailable
+        # on any other host (another subs4free.info host or a third-party page) gets one
+        # attempt, so it can never wipe the clearance cookie the getSub.php POST needs. Running out of the call budget raises ServiceUnavailable
         # from wherever it happens and is not retried: a new identity cannot make the
         # proof of work cheaper.
         deadline = time.monotonic() + SITE_CALL_BUDGET_SECONDS
