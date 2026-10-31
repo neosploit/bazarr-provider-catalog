@@ -28,8 +28,9 @@ BASE_URL = "https://www.subs4free.info"
 _SITE_HOST = urllib.parse.urlparse(BASE_URL).hostname
 SEARCH_URL = f"{BASE_URL}/search_report.php"
 DOWNLOAD_URL = f"{BASE_URL}/getSub.php"
+# The legacy sequence also fetched images.subs4free.info/favicon.ico. That host now sits
+# behind its own Anubis login gate, and downloads succeed without the request.
 ANTI_BLOCK_URLS = (
-    "https://images.subs4free.info/favicon.ico",
     "https://www.subs4series.com/includes/anti-block-layover.php?launch=1",
     "https://www.subs4series.com/includes/anti-block.php",
 )
@@ -603,9 +604,9 @@ class Subs4FreeProvider:
 
     def _open_with_anubis(self, build_request, url, timeout, redir_url=None):
         # Only a failed gate on www.subs4free.info renews the identity and retries. A gate
-        # on any other host (the best-effort anti-block calls, images.subs4free.info
-        # included) gets one attempt, so it can never wipe the clearance cookie the
-        # getSub.php POST needs. Running out of the call budget raises ServiceUnavailable
+        # on any other host (the best-effort subs4series.com anti-block calls, or another
+        # subs4free.info host) gets one attempt, so it can never wipe the clearance cookie
+        # the getSub.php POST needs. Running out of the call budget raises ServiceUnavailable
         # from wherever it happens and is not retried: a new identity cannot make the
         # proof of work cheaper.
         deadline = time.monotonic() + SITE_CALL_BUDGET_SECONDS

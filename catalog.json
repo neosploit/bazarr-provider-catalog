@@ -5713,7 +5713,7 @@
     {
       "manifest": {
         "api_version": "bazarr.provider-hub.v1",
-        "bundle_sha256": "69ff87a94849dde32d69c0da18ff27f6dbe99b9bd2d2f8bd254dcd61c358c036",
+        "bundle_sha256": "53c8d6610640ac720caaa2f77ddb22735743af8c80f37657925a0c87c549a0e1",
         "config_schema": {
           "additionalProperties": false,
           "properties": {
@@ -5743,7 +5743,7 @@
         "entry_class": "Subs4FreeProvider",
         "entry_module": "provider",
         "files": {
-          "provider.py": "e736dfe1d829687c3e9a4ae4763ef2e313ee4556cd803fbad15bc656eb84afdf"
+          "provider.py": "31416755fd27d19f68d8322e4ba19a95fff9e5750268218cd17c8c4f4ffc6a58"
         },
         "languages": [
           "ell",

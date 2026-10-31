@@ -542,7 +542,7 @@ class Subs4FreeProviderTests(unittest.TestCase):
             seen_gets.append((url, referer))
             if url == "https://www.subs4free.info/greek-subtitles/s3591aab93d/inception":
                 return DOWNLOAD_HTML
-            if "anti-block" in url or "favicon.ico" in url:
+            if "anti-block" in url:
                 return b"ok"
             raise AssertionError(f"unexpected GET: {url}")
 
@@ -568,7 +568,10 @@ class Subs4FreeProviderTests(unittest.TestCase):
         self.assertEqual(posts[0][0], "https://www.subs4free.info/getSub.php")
         self.assertEqual(posts[0][1]["id"], "tkMTc4MDI0MDQ5MTE4NTk1MjUxMTg2MTg5NjQ2MTg5")
         self.assertEqual(posts[0][2], "https://www.subs4free.info/greek-subtitles/s3591aab93d/inception")
-        self.assertTrue(any("favicon.ico" in item[0] for item in seen_gets))
+        anti_block = [url for url, _referer in seen_gets if "anti-block" in url]
+        self.assertEqual(anti_block, list(self.mod.ANTI_BLOCK_URLS))
+        # The favicon request is gone: images.subs4free.info is Anubis-gated and not needed.
+        self.assertFalse(any("images.subs4free.info" in url for url, _referer in seen_gets))
         # Archive mode: download() forwards the raw archive bytes for host-side extraction.
         self.assertEqual(base64.b64decode(result["archive_b64"]), archive)
         self.assertEqual(result["archive_sha256"], hashlib.sha256(archive).hexdigest())
@@ -720,9 +723,9 @@ class Subs4FreeAnubisTests(unittest.TestCase):
         self.assertIs(provider._cookie_jar, jar)
 
     def test_failed_gate_on_images_host_keeps_the_site_identity(self):
-        # images.subs4free.info is the first anti-block call. Renewing the identity there
-        # would wipe the www clearance cookie right before the getSub.php POST, which would
-        # then bounce to the detail page and read as the anti-flood penalty.
+        # images.subs4free.info runs its own Anubis gate. Renewing the identity on a failed
+        # gate there would wipe the www clearance cookie right before the getSub.php POST,
+        # which would then bounce to the detail page and read as the anti-flood penalty.
         provider = self.mod.Subs4FreeProvider()
         provider._cookie_jar.set_cookie(_anubis_auth_cookie())
         jar = provider._cookie_jar
@@ -737,7 +740,7 @@ class Subs4FreeAnubisTests(unittest.TestCase):
 
         provider._fetch = fetch
         with self.assertRaises(self.mod.ServiceUnavailable):
-            provider._http_get(self.mod.ANTI_BLOCK_URLS[0])
+            provider._http_get("https://images.subs4free.info/favicon.ico")
         self.assertIs(provider._cookie_jar, jar)
         self.assertTrue(provider._has_anubis_auth("www.subs4free.info"))
         self.assertEqual(len(pages), 1)
