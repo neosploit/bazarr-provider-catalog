@@ -1553,7 +1553,7 @@
     {
       "manifest": {
         "api_version": "bazarr.provider-hub.v1",
-        "bundle_sha256": "2b066badd93df00f59dba5cf6837f8525bbb34a8151be7dcc28f73cb36260627",
+        "bundle_sha256": "baef7e4f166c5d6db7044ac9289cc7a3e966b3cc4c88ab88f6b70fa771545f6e",
         "config_schema": {
           "additionalProperties": false,
           "properties": {
@@ -1583,12 +1583,12 @@
         "entry_class": "GreekSubsProvider",
         "entry_module": "provider",
         "files": {
-          "provider.py": "cd3c38610644fc54ef3871693b6f59a7d253892557c778f53d9369ac786ffb1b"
+          "provider.py": "2bf0fdef544aa5d0c3251bfa68c61adb3c99d4061b9794c4b6fabf7cdc9e5cb2"
         },
         "languages": [
           "ell"
         ],
-        "name": "GreekSubs",
+        "name": "GreekSubs.net",
         "provider_id": "greeksubs",
         "schema_version": 1,
         "secret_fields": [],
@@ -1605,7 +1605,7 @@
           "movie",
           "episode"
         ],
-        "version": "0.1.3"
+        "version": "0.2.0"
       }
     },
     {
