@@ -39,6 +39,7 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 BazarrProviderHub"
 )
 HTTP_TIMEOUT_SECONDS = 15
+CAPTCHA_RETRY_DELAY_SECONDS = 5
 DEFAULT_FLARESOLVERR_TIMEOUT_MS = 25000
 MIN_FLARESOLVERR_TIMEOUT_MS = 5000
 MAX_FLARESOLVERR_TIMEOUT_MS = 25000
@@ -80,6 +81,15 @@ _ANUBIS_CHALLENGE_RE = re.compile(
     r"""<script\s+id=["']anubis_challenge["'][^>]*>\s*(?P<json>.*?)\s*</script>""",
     re.I | re.S,
 )
+
+
+class APIThrottled(Exception):
+    """subs4series kept a reCAPTCHA gate on a download and no captcha solver is configured.
+
+    The gate is occasional and cleared within minutes in live checks, so this is a
+    short-lived block, not a broken provider. The worker maps this class name onto the host's counted
+    APIThrottled: the provider sits out the current run and is retried later.
+    """
 
 
 class CloudflareBlockedError(RuntimeError):
@@ -384,35 +394,37 @@ class Subs4SeriesProvider:
         detail_url = provider_payload.get("detail_url")
         if not detail_url:
             raise ValueError("subs4series detail_url missing from provider payload")
-        _sleep(config)
-        detail_body = self._http_get(detail_url, referer=provider_payload.get("page_link"), config=config)
-        detail_text = _decode(detail_body)
-        # The detail page only links to the getSub page; the reCAPTCHA gate (and the real
-        # POST form) live on that getSub page, not here.
-        first_link = _direct_download_target(detail_text) or _form_download_target(detail_text)
-        if not first_link:
-            raise ValueError("subs4series download link not found on detail page")
-        getsub_url = _absolute_url(first_link)
-        self._apply_anti_block(detail_url, config)
-        _sleep(config)
-        gate_body = self._http_get(getsub_url, referer=detail_url, config=config)
-        # Some subtitles download straight from the getSub page with no captcha gate.
+        page_link = provider_payload.get("page_link")
+        getsub_url, gate_body = self._open_getsub(detail_url, page_link, config)
+        # The getSub page normally answers with the archive itself.
         if _is_archive_body(gate_body):
             return extract_download(gate_body, provider_payload)
         gate_text = _decode(gate_body)
+        if _has_captcha(gate_text) and not _captcha_configured(config):
+            # The reCAPTCHA gate used to guard every download. Since late 2026 it shows up
+            # only now and then and cleared within minutes in live checks, so without a
+            # solver take a fresh getSub token once before giving up.
+            time.sleep(CAPTCHA_RETRY_DELAY_SECONDS)
+            getsub_url, gate_body = self._open_getsub(detail_url, page_link, config)
+            if _is_archive_body(gate_body):
+                return extract_download(gate_body, provider_payload)
+            gate_text = _decode(gate_body)
+            if _has_captcha(gate_text):
+                raise APIThrottled(
+                    "subs4series showed a reCAPTCHA gate for this download twice "
+                    f"(page title: {_page_title(gate_text)!r}). It is usually temporary, so the "
+                    "host retries later. To solve it instead, set captcha_solver_url (+ optional "
+                    "captcha_solver_token) or captcha_response in the provider config."
+                )
         site_key = _captcha_site_key(gate_text)
-        captcha_required = bool(site_key or "g-recaptcha" in gate_text or "grecaptcha" in gate_text)
+        captcha_required = _has_captcha(gate_text)
         form_action = _form_download_target(gate_text) or _direct_download_target(gate_text)
         post_url = _absolute_url(form_action) if form_action else getsub_url
         data = {"my_recaptcha_challenge_field": "manual_challenge"}
         if captcha_required:
             captcha_response = self._captcha_response(site_key, getsub_url, config)
             if not captcha_response:
-                raise ValueError(
-                    "subs4series requires a captcha solver: the download page is gated by reCAPTCHA. "
-                    "Set captcha_solver_url (+ optional captcha_solver_token) or captcha_response in the "
-                    "provider config."
-                )
+                raise ValueError("subs4series captcha solver returned no response token for the reCAPTCHA gate")
             data["g-recaptcha-response"] = captcha_response
             data["recaptcha_response"] = captcha_response
         _sleep(config)
@@ -485,6 +497,20 @@ class Subs4SeriesProvider:
             "provider_payload": payload,
             "display": item["release_info"],
         }
+
+    def _open_getsub(self, detail_url, page_link, config):
+        # The detail page only links to the getSub page; the reCAPTCHA gate (and the real
+        # POST form) live on that getSub page, not here. Each detail page load hands out a
+        # fresh getSub token.
+        _sleep(config)
+        detail_text = _decode(self._http_get(detail_url, referer=page_link, config=config))
+        first_link = _direct_download_target(detail_text) or _form_download_target(detail_text)
+        if not first_link:
+            raise ValueError("subs4series download link not found on detail page")
+        getsub_url = _absolute_url(first_link)
+        self._apply_anti_block(detail_url, config)
+        _sleep(config)
+        return getsub_url, self._http_get(getsub_url, referer=detail_url, config=config)
 
     def _apply_anti_block(self, referer, config):
         for url in ANTI_BLOCK_URLS:
@@ -1060,6 +1086,20 @@ def _form_download_target(text):
         if action:
             return action
     return None
+
+
+def _has_captcha(text):
+    return bool(_captcha_site_key(text) or "g-recaptcha" in text or "grecaptcha" in text)
+
+
+def _captcha_configured(config):
+    return bool(config.get("captcha_response") or _coerce_text(config.get("captcha_solver_url")))
+
+
+def _page_title(text):
+    match = re.search(r"<title[^>]*>(.*?)</title>", text, re.I | re.S)
+    title = " ".join(html.unescape(match.group(1)).split()) if match else ""
+    return title[:80] or "none"
 
 
 def _captcha_site_key(text):

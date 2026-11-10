@@ -682,31 +682,86 @@ class Subs4SeriesProviderTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(result["archive_b64"]), _zip_body())
         self.assertEqual(result["episode"], 1)
 
-    def test_download_requires_captcha_solution_when_page_has_recaptcha(self):
+    def _gated_download(self, getsub_bodies, config=None, post_body=None):
+        # Serves each getSub fetch the next body from getsub_bodies, and records the
+        # detail page loads, getSub fetches, POSTs and sleeps the download makes.
         provider = self.mod.Subs4SeriesProvider()
+        calls = {"detail": 0, "getsub": 0, "posts": [], "sleeps": []}
+        bodies = list(getsub_bodies)
 
         def get_stub(url, timeout=15, referer=None, config=None):
             del timeout, referer, config
             if url == DETAIL_URL:
+                calls["detail"] += 1
                 return DETAIL_PAGE_HTML
             if url == GETSUB_FIRST_URL:
-                return CAPTCHA_DOWNLOAD_HTML
+                calls["getsub"] += 1
+                return bodies.pop(0)
             if "anti-block" in url:
                 return b"ok"
             raise AssertionError(f"unexpected GET: {url}")
 
-        provider._http_get = get_stub
+        def post_stub(url, data, timeout=15, referer=None):
+            del timeout, referer
+            calls["posts"].append((url, data))
+            return post_body if post_body is not None else _zip_body()
 
-        with self.assertRaisesRegex(ValueError, "captcha"):
-            provider.download(
-                {
-                    "detail_url": DETAIL_URL,
-                    "page_link": "https://www.subs4series.com/tv-series/game-of-thrones/s8985ffc551/season-1/episode-1",
-                    "filename": "Game.of.Thrones.S01E01.HDTV.XviD-FEVER.el.zip",
-                },
-                {"alpha3": "ell", "alpha2": "el"},
-                {"request_delay_ms": 0},
-            )
+        provider._http_get = get_stub
+        provider._http_post = post_stub
+        payload = {
+            "detail_url": DETAIL_URL,
+            "page_link": "https://www.subs4series.com/tv-series/game-of-thrones/s8985ffc551/season-1/episode-1",
+            "filename": "Game.of.Thrones.S01E01.HDTV.XviD-FEVER.el.zip",
+            "season": 1,
+            "episode": 1,
+        }
+        with patch.object(self.mod.time, "sleep", side_effect=calls["sleeps"].append):
+            result = provider.download(payload, {"alpha3": "ell", "alpha2": "el"}, {"request_delay_ms": 0, **(config or {})})
+        return result, calls
+
+    def test_download_takes_a_fresh_token_once_when_an_unsolvable_captcha_shows(self):
+        # The gate is occasional now: without a solver, reload the detail page for a new
+        # getSub token, and the second getSub answers with the archive.
+        result, calls = self._gated_download([CAPTCHA_DOWNLOAD_HTML, _zip_body()])
+
+        self.assertEqual(base64.b64decode(result["archive_b64"]), _zip_body())
+        self.assertEqual(result["episode"], 1)
+        self.assertEqual((calls["detail"], calls["getsub"]), (2, 2))
+        self.assertEqual(calls["sleeps"], [self.mod.CAPTCHA_RETRY_DELAY_SECONDS])
+        self.assertEqual(calls["posts"], [])
+
+    def test_download_reports_a_captcha_that_stays_as_throttled(self):
+        gate = CAPTCHA_DOWNLOAD_HTML.replace(b"<form", b"<title>Subs4Series - Download</title><form", 1)
+
+        with self.assertRaises(self.mod.APIThrottled) as raised:
+            self._gated_download([gate, gate])
+
+        message = str(raised.exception)
+        self.assertIn("reCAPTCHA", message)
+        self.assertIn("'Subs4Series - Download'", message)
+        self.assertIn("captcha_solver_url", message)
+
+    def test_download_with_a_solver_does_not_wait_for_the_captcha_to_clear(self):
+        result, calls = self._gated_download([CAPTCHA_DOWNLOAD_HTML], config={"captcha_response": "solved-token"})
+
+        self.assertEqual(base64.b64decode(result["archive_b64"]), _zip_body())
+        self.assertEqual((calls["detail"], calls["getsub"]), (1, 1))
+        self.assertEqual(calls["sleeps"], [])
+        self.assertEqual(calls["posts"][0][1]["g-recaptcha-response"], "solved-token")
+
+    def test_download_fails_clearly_when_the_solver_returns_no_token(self):
+        provider_raw = []
+
+        def raw_stub(self, url, method="GET", data=None, headers=None, timeout=15):
+            del self, method, data, headers, timeout
+            provider_raw.append(url)
+            return b'{"error": "unsolved"}'
+
+        with patch.object(self.mod.Subs4SeriesProvider, "_raw_request", raw_stub):
+            with self.assertRaisesRegex(ValueError, "no response token"):
+                self._gated_download([CAPTCHA_DOWNLOAD_HTML], config={"captcha_solver_url": "http://solver.local/solve"})
+
+        self.assertEqual(provider_raw, ["http://solver.local/solve"])
 
     def test_create_cloudscraper_uses_ai_cloudscraper_options(self):
         scraper = object()

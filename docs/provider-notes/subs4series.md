@@ -40,4 +40,9 @@ Legacy Bazarr solved Subs4Series reCAPTCHA through process-global anti-captcha s
 - `captcha_solver_token`: optional bearer token for that helper endpoint.
 - `captcha_solver_timeout_ms`: timeout for the helper endpoint.
 
-If Subs4Series asks for reCAPTCHA and no response is available, downloads fail with a clear captcha error instead of silently returning empty content.
+The reCAPTCHA gate on the getSub page used to guard every download. In November 2026 the getSub page answered with the archive directly in 10 of 11 live fetches, and the one gated subtitle downloaded without a captcha a few minutes later. So a solver is optional:
+
+- With a solver or `captcha_response` set, a gated download is solved and posted at once.
+- Without one, the worker waits 5 seconds, reloads the detail page for a fresh getSub token and tries once more.
+- If the gate is still there, the worker raises `APIThrottled`, naming the page title. The host sits the provider out and retries later, instead of counting a broken download.
+- A configured solver that returns no token fails with a clear captcha error, instead of silently returning empty content.
