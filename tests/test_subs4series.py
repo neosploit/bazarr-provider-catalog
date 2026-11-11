@@ -113,6 +113,26 @@ class Subs4SeriesParserTests(unittest.TestCase):
     def setUp(self):
         self.mod = _load_provider_module()
 
+    def test_episode_markers_read_the_release_name_forms_the_site_uses(self):
+        cases = {
+            "Breaking Bad S01E02 720p": (1, 2),
+            "The Office 2x01 - Pilot": (2, 1),
+            # Both seen live, where they used to score 75 instead of 100.
+            "The office(BBC) S02-Ep01": (2, 1),
+            "Breaking Bad Season 1 Episode 01 - Pilot-gre": (1, 1),
+            "Lost S03 E10 HDTV": (3, 10),
+            "Lost S3.Ep.10": (3, 10),
+            "Lost season 3 ep 10": (3, 10),
+        }
+        for release, expected in cases.items():
+            with self.subTest(release=release):
+                self.assertEqual(self.mod._episode_markers(self.mod._normalize(release)), expected)
+
+    def test_episode_markers_ignore_numbers_that_are_not_an_episode(self):
+        for release in ("Breaking Bad 1080p x264 DDP5 1", "Breaking Bad Season 1 Complete", "Seasons 1080p", "Sons 2 Ep"):
+            with self.subTest(release=release):
+                self.assertEqual(self.mod._episode_markers(self.mod._normalize(release)), (None, None))
+
     def test_parse_suggestions_extracts_show_paths(self):
         rows = self.mod.parse_suggestions(SUGGESTIONS_HTML)
 

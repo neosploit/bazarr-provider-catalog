@@ -71,8 +71,12 @@ _FORM_RE = re.compile(r"<form\b[^>]*>", re.I | re.S)
 _WS_RE = re.compile(r"\s+")
 _NON_ALNUM_RE = re.compile(r"[\W_]+", re.UNICODE)
 _YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
-_SXXEXX_RE = re.compile(r"\bs0*(?P<season>\d{1,2})e0*(?P<episode>\d{1,3})\b", re.I)
+# These run on _normalize()d text, where punctuation is a space: "S02-Ep01" reads "s02 ep01".
+_SXXEXX_RE = re.compile(r"\bs0*(?P<season>\d{1,2}) ?ep? ?0*(?P<episode>\d{1,3})\b", re.I)
 _X_EPISODE_RE = re.compile(r"\b0*(?P<season>\d{1,2})x0*(?P<episode>\d{1,3})\b", re.I)
+_SEASON_EPISODE_WORDS_RE = re.compile(
+    r"\bseason 0*(?P<season>\d{1,2}) (?:episode|ep) 0*(?P<episode>\d{1,3})\b", re.I
+)
 _META_REFRESH_RE = re.compile(
     r"""<meta\s+http-equiv=["']refresh["']\s+content=["'](?P<delay>\d+);\s*url=(?P<url>[^"']+)["']""",
     re.I,
@@ -1228,7 +1232,7 @@ def _normalize_release_group(value):
 
 
 def _episode_markers(normalized):
-    for pattern in (_SXXEXX_RE, _X_EPISODE_RE):
+    for pattern in (_SXXEXX_RE, _X_EPISODE_RE, _SEASON_EPISODE_WORDS_RE):
         match = pattern.search(normalized or "")
         if match:
             return int(match.group("season")), int(match.group("episode"))
