@@ -586,6 +586,62 @@ class Subs4SeriesProviderTests(unittest.TestCase):
         self.assertTrue(all("series" in item["matches"] for item in results))
         self.assertEqual({item["score"] for item in results}, {100})
 
+    def _search_with_pages(self, video, responses):
+        provider = self.mod.Subs4SeriesProvider()
+
+        def stub(url, timeout=15, referer=None, config=None):
+            del timeout, referer, config
+            if url not in responses:
+                raise AssertionError(f"unexpected URL: {url}")
+            return responses[url]
+
+        provider._http_get = stub
+        return provider.search({"kind": "episode", "season": 1, "episode": 1, **video}, [{"alpha3": "ell", "alpha2": "el"}], {})
+
+    def test_search_drops_another_countrys_shows_found_without_the_qualifier(self):
+        # The site has no British "The Office": its two shows of that name are dated 2005 and
+        # 2024, both far from 2001, so a UK video gets nothing rather than US subtitles.
+        results = self._search_with_pages(
+            {"series": "The Office (UK)", "year": 2001},
+            {
+                "https://www.subs4series.com/search_report.php?search=The+Office+%28UK%29&searchType=1": OFFICE_SUGGESTIONS_HTML,
+                OFFICE_2024_EPISODE_URL: _episode_html_of_year(2024),
+                OFFICE_2005_EPISODE_URL: _episode_html_of_year(2005),
+            },
+        )
+
+        self.assertEqual(results, [])
+
+    def test_search_drops_a_lone_qualified_site_show_of_another_year(self):
+        # "Shameless" 2004 is the British show; the site's only match is "Shameless (US)" (2011).
+        suggestions = b'<select name="Mov_sel"><option value="/tv-series/shameless-us/s8a71806125">Shameless (US)</option></select>'
+        responses = {
+            "https://www.subs4series.com/search_report.php?search=Shameless&searchType=1": suggestions,
+            "https://www.subs4series.com/tv-series/shameless-us/s8a71806125/season-1/episode-1": _episode_html_of_year(2011),
+        }
+
+        self.assertEqual(self._search_with_pages({"series": "Shameless", "year": 2004}, responses), [])
+        self.assertTrue(self._search_with_pages({"series": "Shameless", "year": 2011}, responses))
+        # Without a video year there is nothing to check the show against, so it is kept.
+        self.assertTrue(self._search_with_pages({"series": "Shameless"}, responses))
+
+    def test_search_keeps_every_exact_title_show_when_none_is_near_the_year(self):
+        # The 2005 page gets its own subtitle links, or deduplication would hide it.
+        page_2005 = _episode_html_of_year(2005).replace(b"/greek-subtitles/s277e869f4/", b"/greek-subtitles/s2005000000/")
+        results = self._search_with_pages(
+            {"series": "The Office", "year": 2001},
+            {
+                "https://www.subs4series.com/search_report.php?search=The+Office&searchType=1": OFFICE_SUGGESTIONS_HTML,
+                OFFICE_2024_EPISODE_URL: _episode_html_of_year(2024),
+                OFFICE_2005_EPISODE_URL: page_2005,
+            },
+        )
+
+        self.assertEqual(
+            {item["provider_payload"]["page_link"] for item in results},
+            {OFFICE_2024_EPISODE_URL, OFFICE_2005_EPISODE_URL},
+        )
+
     def test_search_keeps_the_series_match_for_a_show_found_by_an_alternative_title(self):
         provider = self.mod.Subs4SeriesProvider()
         responses = {

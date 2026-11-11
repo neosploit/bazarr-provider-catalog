@@ -359,7 +359,7 @@ class Subs4SeriesProvider:
         requested = {language for language in requested if language in SUPPORTED_LANGUAGES}
         if not requested:
             return []
-        show_paths = self._find_show_paths(video, config or {})
+        show_paths, exact_title = self._find_shows(video, config or {})
         pages = []
         for show_path in show_paths:
             episode_url = _episode_url(show_path, video)
@@ -371,6 +371,8 @@ class Subs4SeriesProvider:
                 continue
             text = _decode(body)
             pages.append((episode_url, _series_year_from_page(text), parse_episode_page(text)))
+        if not exact_title:
+            pages = _pages_near_year(pages, video.get("year"))
         results = []
         seen = set()
         for episode_url, _year, items in _pages_for_year(pages, video.get("year")):
@@ -444,6 +446,10 @@ class Subs4SeriesProvider:
         return extract_download(download_body, provider_payload)
 
     def _find_show_paths(self, video, config):
+        return self._find_shows(video, config)[0]
+
+    def _find_shows(self, video, config):
+        """The show paths for the video's title, and whether they matched it exactly."""
         for title in _video_titles(video):
             query = urllib.parse.urlencode({"search": title, "searchType": "1"})
             url = f"{SEARCH_URL}?{query}"
@@ -459,11 +465,11 @@ class Subs4SeriesProvider:
             ]
             paths = list(dict.fromkeys(s["show_path"] for s in (exact or loose)))
             if paths:
-                return paths
-        return []
+                return paths, bool(exact)
+        return [], True
 
     def _result(self, video, item, episode_url):
-        # Every item here comes from a show _find_show_paths matched by title and year.
+        # Every item here comes from a show _find_shows matched by title and year.
         matches = derive_matches(video, item, show_matched=True)
         score = compute_score(video, item, show_matched=True)
         alpha2 = item["alpha2"]
@@ -949,6 +955,20 @@ def _pages_for_year(pages, video_year):
         return same_year
     year_off = [page for page in pages if page[1] is not None and abs(page[1] - year) == 1]
     return year_off or pages
+
+
+def _pages_near_year(pages, video_year):
+    """Only the shows dated within a year of the video, for a show matched without its qualifier.
+
+    Ignoring a country qualifier can land on another country's show: Sonarr's "The Office (UK)"
+    finds only the site's "The Office" (2005, US) and "The Office" (2024). Unlike a title match,
+    such a show must prove it is the video's by its year, even when it is the only one. With no
+    video year, or a page whose year cannot be read, there is nothing to check, so it is kept.
+    """
+    year = _safe_int(video_year)
+    if year is None:
+        return pages
+    return [page for page in pages if page[1] is None or abs(page[1] - year) <= 1]
 
 
 _TITLE_QUALIFIER_RE = re.compile(
