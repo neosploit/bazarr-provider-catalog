@@ -540,8 +540,13 @@ class Subs4SeriesProviderTests(unittest.TestCase):
             b"</select>"
         )
 
-        paths, _calls = self._find_show_paths({"series": "Shameless", "year": 2004}, html)
+        # Without a video year an exact title wins outright.
+        paths, _calls = self._find_show_paths({"series": "Shameless"}, html)
         self.assertEqual(paths, ["tv-series/shameless/s1234567890"])
+
+        # With one, both go on to compete by page year (see the search tests).
+        paths, _calls = self._find_show_paths({"series": "Shameless", "year": 2004}, html)
+        self.assertEqual(paths, ["tv-series/shameless/s1234567890", "tv-series/shameless-us/s8a71806125"])
 
     def test_find_show_paths_takes_dated_site_titles_only_for_their_year(self):
         html = (
@@ -624,6 +629,33 @@ class Subs4SeriesProviderTests(unittest.TestCase):
         self.assertTrue(self._search_with_pages({"series": "Shameless", "year": 2011}, responses))
         # Without a video year there is nothing to check the show against, so it is kept.
         self.assertTrue(self._search_with_pages({"series": "Shameless"}, responses))
+
+    def test_search_lets_an_exact_and_a_qualified_show_compete_by_year(self):
+        # A site listing both "Shameless" (UK, 2004) and "Shameless (US)" (2011): the exact
+        # title must not win for a 2011 video.
+        suggestions = (
+            b'<select name="Mov_sel">'
+            b'<option value="/tv-series/shameless/s1234567890">Shameless</option>'
+            b'<option value="/tv-series/shameless-us/s8a71806125">Shameless (US)</option>'
+            b"</select>"
+        )
+        uk_url = "https://www.subs4series.com/tv-series/shameless/s1234567890/season-1/episode-1"
+        us_url = "https://www.subs4series.com/tv-series/shameless-us/s8a71806125/season-1/episode-1"
+        responses = {
+            "https://www.subs4series.com/search_report.php?search=Shameless&searchType=1": suggestions,
+            uk_url: _episode_html_of_year(2004),
+            us_url: _episode_html_of_year(2011).replace(b"/greek-subtitles/s277e869f4/", b"/greek-subtitles/s2011000000/"),
+        }
+
+        def shows(video):
+            return {item["provider_payload"]["page_link"] for item in self._search_with_pages(video, responses)}
+
+        self.assertEqual(shows({"series": "Shameless", "year": 2011}), {us_url})
+        self.assertEqual(shows({"series": "Shameless", "year": 2012}), {us_url})
+        self.assertEqual(shows({"series": "Shameless", "year": 2004}), {uk_url})
+        self.assertEqual(shows({"series": "Shameless"}), {uk_url})
+        # No show within a year: the exact title is kept, as before.
+        self.assertEqual(shows({"series": "Shameless", "year": 1990}), {uk_url})
 
     def test_search_keeps_every_exact_title_show_when_none_is_near_the_year(self):
         # The 2005 page gets its own subtitle links, or deduplication would hide it.

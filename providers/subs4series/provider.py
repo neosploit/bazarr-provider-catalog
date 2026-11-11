@@ -359,9 +359,8 @@ class Subs4SeriesProvider:
         requested = {language for language in requested if language in SUPPORTED_LANGUAGES}
         if not requested:
             return []
-        show_paths, exact_title = self._find_shows(video, config or {})
         pages = []
-        for show_path in show_paths:
+        for show_path, exact_title in self._find_shows(video, config or {}):
             episode_url = _episode_url(show_path, video)
             if not episode_url:
                 continue
@@ -370,12 +369,10 @@ class Subs4SeriesProvider:
             if body is None:
                 continue
             text = _decode(body)
-            pages.append((episode_url, _series_year_from_page(text), parse_episode_page(text)))
-        if not exact_title:
-            pages = _pages_near_year(pages, video.get("year"))
+            pages.append((episode_url, _series_year_from_page(text), parse_episode_page(text), exact_title))
         results = []
         seen = set()
-        for episode_url, _year, items in _pages_for_year(pages, video.get("year")):
+        for episode_url, _year, items, _exact in _select_pages(pages, video.get("year")):
             for item in items:
                 if item["language"] not in requested:
                     continue
@@ -446,27 +443,35 @@ class Subs4SeriesProvider:
         return extract_download(download_body, provider_payload)
 
     def _find_show_paths(self, video, config):
-        return self._find_shows(video, config)[0]
+        return [path for path, _exact in self._find_shows(video, config)]
 
     def _find_shows(self, video, config):
-        """The show paths for the video's title, and whether they matched it exactly."""
+        """(show_path, exact_title) for each show matching the video's title."""
         for title in _video_titles(video):
             query = urllib.parse.urlencode({"search": title, "searchType": "1"})
             url = f"{SEARCH_URL}?{query}"
             _sleep(config)
             suggestions = parse_suggestions(self._http_get(url, referer=BASE_URL, config=config))
-            # An exact title wins. Only without one does a title differing by a trailing
-            # "(US)" or "(2005)" qualifier count: the site and Sonarr each add one where
-            # the other may not ("Shameless (US)" here, "The Office (US)" in Sonarr).
-            exact = [s for s in suggestions if _title_matches(s["title"], title, video.get("year"))]
-            loose = [
-                s for s in suggestions
-                if _title_matches_without_qualifier(s["title"], title, video.get("year"))
+            # A title differing by a trailing "(US)" or "(2005)" qualifier counts too: the
+            # site and Sonarr each add one where the other may not ("Shameless (US)" here,
+            # "The Office (US)" in Sonarr). With a video year, both kinds go on to compete by
+            # page year in _select_pages; without one, an exact title wins outright.
+            exact = list(dict.fromkeys(
+                s["show_path"] for s in suggestions if _title_matches(s["title"], title, video.get("year"))
+            ))
+            qualified = [
+                path for path in dict.fromkeys(
+                    s["show_path"] for s in suggestions
+                    if _title_matches_without_qualifier(s["title"], title, video.get("year"))
+                )
+                if path not in exact
             ]
-            paths = list(dict.fromkeys(s["show_path"] for s in (exact or loose)))
-            if paths:
-                return paths, bool(exact)
-        return [], True
+            if exact and _safe_int(video.get("year")) is None:
+                qualified = []
+            shows = [(path, True) for path in exact] + [(path, False) for path in qualified]
+            if shows:
+                return shows
+        return []
 
     def _result(self, video, item, episode_url):
         # Every item here comes from a show _find_shows matched by title and year.
@@ -957,18 +962,29 @@ def _pages_for_year(pages, video_year):
     return year_off or pages
 
 
-def _pages_near_year(pages, video_year):
-    """Only the shows dated within a year of the video, for a show matched without its qualifier.
+def _select_pages(pages, video_year):
+    """The episode pages to take subtitles from, each (url, page_year, items, exact_title).
 
-    Ignoring a country qualifier can land on another country's show: Sonarr's "The Office (UK)"
-    finds only the site's "The Office" (2005, US) and "The Office" (2024). Unlike a title match,
-    such a show must prove it is the video's by its year, even when it is the only one. With no
-    video year, or a page whose year cannot be read, there is nothing to check, so it is kept.
+    exact_title is False for a show matched only by ignoring a trailing "(US)" or "(2005)"
+    qualifier. Ignoring one can land on another country's show, so such a show counts only
+    when its page-header year is within a year of the video's, even when it is the only one:
+    Sonarr's "The Office (UK)" (2001) must not take the site's US (2005) or 2024 show.
+
+    With a video year, exact and qualified shows compete on it: a site with both "Shameless"
+    (2004, UK) and "Shameless (US)" (2011) gives a 2011 video the US show. The same year wins
+    over one year off. With no show within a year, the exact titles are kept as before, and
+    without a video year, an exact title wins outright.
     """
     year = _safe_int(video_year)
+    exact = [page for page in pages if page[3]]
+    qualified = [page for page in pages if not page[3]]
     if year is None:
-        return pages
-    return [page for page in pages if page[1] is None or abs(page[1] - year) <= 1]
+        return exact or qualified
+    qualified = [page for page in qualified if page[1] is None or abs(page[1] - year) <= 1]
+    dated = [page for page in exact + qualified if page[1] is not None and abs(page[1] - year) <= 1]
+    if dated:
+        return _pages_for_year(dated, year)
+    return exact or qualified
 
 
 _TITLE_QUALIFIER_RE = re.compile(

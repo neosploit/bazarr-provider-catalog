@@ -11,8 +11,12 @@
 ## Preserved Behavior
 
 - Searches the legacy `search_report.php?search=<title>&searchType=1` flow.
-- Uses `select[name="Mov_sel"]` suggestions and accepts exact show title or show title plus year. Without an exact match, a title that differs only by a trailing `(US)`-style country or `(2005)`-style year qualifier on either side counts: Subs4Series names `Shameless (US)` where Sonarr may not, and Sonarr names `The Office (US)` where Subs4Series does not. Different countries never match, and a dated site title needs the video's year. A show matched this way must also have a page-header year within one year of the video's, even when it is the only one: Sonarr's `The Office (UK)` (2001) finds only the site's US (2005) and 2024 shows, so it gets no results rather than another country's subtitles. With no video year, or no readable page year, the show is kept.
-- Subs4Series lists no IMDb/TVDB ids. When several shows share the title ("The Office" 2005 and 2024), keeps only those whose page-header year is the video's year, or failing that one year off; with no video year, or no show within a year, keeps them all.
+- Uses `select[name="Mov_sel"]` suggestions and accepts exact show title or show title plus year. A title that differs only by a trailing `(US)`-style country or `(2005)`-style year qualifier on either side counts too: Subs4Series names `Shameless (US)` where Sonarr may not, and Sonarr names `The Office (US)` where Subs4Series does not. Different countries never match, and a dated site title needs the video's year.
+- Subs4Series lists no IMDb/TVDB ids, so shows are told apart by the year in each episode page's header. With a video year:
+  - A show matched only by ignoring a qualifier counts only within one year of the video's, even when it is the only one. Sonarr's `The Office (UK)` (2001) finds only the site's US (2005) and 2024 shows, so it gets no results rather than another country's subtitles.
+  - Exact and qualified titles then compete on the year: the same year wins, then one year off. A site with both `Shameless` (2004) and `Shameless (US)` (2011) gives a 2011 video the US show.
+  - With no show within a year, the exact-title shows are all kept.
+- Without a video year, an exact title wins outright, and every show of that title is kept. A page whose year cannot be read is kept when nothing else can be checked.
 - An episode page that answers 404 means that show lacks the episode; the search continues with the next show of the same title.
 - Builds episode URLs as `/tv-series/<show>/season-<season>/episode-<episode>`.
 - Parses `seeDark` and `seeMedium` subtitle rows.

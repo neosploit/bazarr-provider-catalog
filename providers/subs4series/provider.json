@@ -1,7 +1,7 @@
 {
   "anti_captcha": true,
   "api_version": "bazarr.provider-hub.v1",
-  "bundle_sha256": "33a1b4ca0c766a7a3ab269bf90e2dc2951d78b286e6bf71421e5bc297d8c2f03",
+  "bundle_sha256": "092e3550e5014c38d9a0c3cf808e66566e5d26b01f69d1f7b9e99fbf5004d9ea",
   "config_schema": {
     "additionalProperties": false,
     "properties": {
@@ -341,7 +341,7 @@
   "entry_class": "Subs4SeriesProvider",
   "entry_module": "provider",
   "files": {
-    "provider.py": "eeb705dc91d3469515873d1cc653b4efa7341842b11856cee742fa6c26fb565a"
+    "provider.py": "0d4ebc1d04d77c2ac9808ff11fde55fc044f9c7c93da7cc79b0db482bbf9e169"
   },
   "flaresolverr": true,
   "languages": [
