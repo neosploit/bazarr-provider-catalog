@@ -290,7 +290,14 @@ def _safe_int(value):
         return None
 
 
-def derive_matches(video, item):
+def derive_matches(video, item, show_matched=False):
+    """The video properties this subtitle matches.
+
+    show_matched is True when the subtitle comes from a show the search already picked by
+    title and year. That show is the video's series even when its site title lacks a word
+    of the requested one, such as Sonarr's "The Office (US)" against the site's
+    "The Office", or when it was found through an alternative title.
+    """
     video = video or {}
     release = item.get("release_info") if isinstance(item, dict) else item
     series_title = item.get("series_title", "") if isinstance(item, dict) else ""
@@ -298,7 +305,7 @@ def derive_matches(video, item):
     normalized = _normalize(text)
     matches = []
     series_tokens = _tokens(video.get("series"))
-    if series_tokens and all(token in normalized.split() for token in series_tokens):
+    if show_matched or (series_tokens and all(token in normalized.split() for token in series_tokens)):
         matches.append("series")
     season, episode = _episode_markers(normalized)
     try:
@@ -323,8 +330,8 @@ def derive_matches(video, item):
     return matches
 
 
-def compute_score(video, item):
-    matches = set(derive_matches(video, item))
+def compute_score(video, item, show_matched=False):
+    matches = set(derive_matches(video, item, show_matched=show_matched))
     if {"series", "season", "episode"}.issubset(matches):
         return 100
     if {"series", "episode"}.issubset(matches):
@@ -456,8 +463,9 @@ class Subs4SeriesProvider:
         return []
 
     def _result(self, video, item, episode_url):
-        matches = derive_matches(video, item)
-        score = compute_score(video, item)
+        # Every item here comes from a show _find_show_paths matched by title and year.
+        matches = derive_matches(video, item, show_matched=True)
+        score = compute_score(video, item, show_matched=True)
         alpha2 = item["alpha2"]
         filename = (
             f"subs4series.{_slug(item.get('series_title'))}."

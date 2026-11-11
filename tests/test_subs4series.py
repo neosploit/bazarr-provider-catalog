@@ -581,6 +581,51 @@ class Subs4SeriesProviderTests(unittest.TestCase):
 
         self.assertTrue(results)
         self.assertEqual({item["provider_payload"]["page_link"] for item in results}, {OFFICE_2005_EPISODE_URL})
+        # The release names lack "US", yet the show was picked by title and year, so its
+        # subtitles keep the series match instead of falling to 40.
+        self.assertTrue(all("series" in item["matches"] for item in results))
+        self.assertEqual({item["score"] for item in results}, {100})
+
+    def test_search_keeps_the_series_match_for_a_show_found_by_an_alternative_title(self):
+        provider = self.mod.Subs4SeriesProvider()
+        responses = {
+            "https://www.subs4series.com/search_report.php?search=Le+Trone+de+fer&searchType=1": b"<html></html>",
+            "https://www.subs4series.com/search_report.php?search=Game+of+Thrones&searchType=1": SUGGESTIONS_HTML,
+            "https://www.subs4series.com/tv-series/game-of-thrones/s8985ffc551/season-1/episode-1": EPISODE_HTML,
+            "https://www.subs4series.com/tv-series/game-of-thrones-2011/s1111111111/season-1/episode-1": EPISODE_HTML,
+        }
+
+        def stub(url, timeout=15, referer=None, config=None):
+            del timeout, referer, config
+            if url not in responses:
+                raise AssertionError(f"unexpected URL: {url}")
+            return responses[url]
+
+        provider._http_get = stub
+        results = provider.search(
+            {
+                "kind": "episode",
+                "series": "Le Trone de fer",
+                "alternative_series": ["Game of Thrones"],
+                "year": 2011,
+                "season": 1,
+                "episode": 1,
+            },
+            [{"alpha3": "ell", "alpha2": "el"}],
+            {},
+        )
+
+        self.assertTrue(results)
+        self.assertEqual({item["score"] for item in results}, {100})
+
+    def test_derive_matches_alone_still_needs_the_series_words(self):
+        item = {"series_title": "The Office", "release_info": "The Office 1x01 - Pilot"}
+        video = {"series": "The Office (US)", "season": 1, "episode": 1}
+
+        self.assertNotIn("series", self.mod.derive_matches(video, item))
+        self.assertIn("series", self.mod.derive_matches(video, item, show_matched=True))
+        self.assertEqual(self.mod.compute_score(video, item), 40)
+        self.assertEqual(self.mod.compute_score(video, item, show_matched=True), 100)
 
     def test_search_rejects_movies(self):
         provider = self.mod.Subs4SeriesProvider()
