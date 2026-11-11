@@ -39,6 +39,9 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 BazarrProviderHub"
 )
 HTTP_TIMEOUT_SECONDS = 15
+# One site call, an Anubis solve included, stays well inside the host's 120 s worker timeout,
+# as in subs4free. Running out aborts the call with ServiceUnavailable; it is never retried.
+SITE_CALL_BUDGET_SECONDS = 60
 CAPTCHA_RETRY_DELAY_SECONDS = 5
 DEFAULT_FLARESOLVERR_TIMEOUT_MS = 25000
 MIN_FLARESOLVERR_TIMEOUT_MS = 5000
@@ -93,6 +96,13 @@ class APIThrottled(Exception):
     The gate is occasional and cleared within minutes in live checks, so this is a
     short-lived block, not a broken provider. The worker maps this class name onto the host's counted
     APIThrottled: the provider sits out the current run and is retried later.
+    """
+
+
+class ServiceUnavailable(RuntimeError):
+    """A site call ran out of its time budget, typically while solving an Anubis challenge.
+
+    The worker maps this class name onto the host's ServiceUnavailable.
     """
 
 
@@ -569,6 +579,7 @@ class Subs4SeriesProvider:
         return None
 
     def _http_get(self, url, timeout=HTTP_TIMEOUT_SECONDS, referer=None, config=None):
+        deadline = time.monotonic() + SITE_CALL_BUDGET_SECONDS
         headers = _browser_headers(referer, self._flaresolverr_user_agent or self._user_agent, self._flaresolverr_cookies)
         scraper = self._get_scraper()
         if scraper is not None:
@@ -582,10 +593,10 @@ class Subs4SeriesProvider:
             if body is None:
                 body = str(getattr(response, "text", "")).encode("utf-8")
             if is_anubis_challenge(getattr(response, "url", ""), getattr(response, "status_code", 0)) or _has_anubis_challenge_body(body):
-                solved = solve_anubis_challenge(scraper, response.url, url, timeout=timeout)
+                solved = solve_anubis_challenge(scraper, response.url, url, timeout=timeout, deadline=deadline)
                 if not solved:
                     raise CloudflareBlockedError("subs4series Anubis challenge could not be solved")
-                response = scraper.get(url, headers=headers, timeout=timeout)
+                response = scraper.get(url, headers=headers, timeout=_request_timeout(timeout, deadline, "resource_refetch"))
                 body = getattr(response, "content", None)
                 if body is None:
                     body = str(getattr(response, "text", "")).encode("utf-8")
@@ -780,10 +791,12 @@ def _extract_anubis_challenge(html_text):
     }
 
 
-def _solve_pow(random_data, difficulty):
+def _solve_pow(random_data, difficulty, deadline=None):
     prefix = "0" * difficulty
     nonce = 0
     while True:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise ServiceUnavailable("subs4series Anubis stage=proof_of_work budget_exhausted")
         digest = hashlib.sha256(f"{random_data}{nonce}".encode("utf-8")).hexdigest()
         if digest.startswith(prefix):
             return nonce, digest
@@ -794,8 +807,33 @@ def _solve_preact(random_data, difficulty):
     return hashlib.sha256(random_data.encode("utf-8")).hexdigest(), difficulty * 0.125
 
 
-def solve_anubis_challenge(session, challenge_url, original_url, timeout=HTTP_TIMEOUT_SECONDS):
+def _remaining(deadline, stage):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ServiceUnavailable(f"subs4series Anubis stage={stage} budget_exhausted")
+    return remaining
+
+
+def _request_timeout(timeout, deadline, stage):
+    return min(timeout, _remaining(deadline, stage))
+
+
+def _connect_read_timeout(timeout, deadline, stage):
+    remaining = _remaining(deadline, stage)
+    return (min(10, remaining), min(timeout, remaining))
+
+
+def _budget_sleep(seconds, deadline, stage):
+    # The delay comes from the challenge page; never wait past the call's budget for it.
+    if seconds >= _remaining(deadline, stage):
+        raise ServiceUnavailable(f"subs4series Anubis stage={stage} budget_exhausted")
+    time.sleep(seconds)
+
+
+def solve_anubis_challenge(session, challenge_url, original_url, timeout=HTTP_TIMEOUT_SECONDS, deadline=None):
     del original_url
+    if deadline is None:
+        deadline = time.monotonic() + SITE_CALL_BUDGET_SECONDS
     parsed = urllib.parse.urlparse(challenge_url)
     query = urllib.parse.parse_qs(parsed.query)
     redir = query.get("redir", [parsed.path])[0]
@@ -803,7 +841,9 @@ def solve_anubis_challenge(session, challenge_url, original_url, timeout=HTTP_TI
     challenge_page_url = challenge_url if challenge_url.startswith("http") else base + challenge_url
     started = time.monotonic()
 
-    response = session.get(challenge_page_url, timeout=(10, timeout), allow_redirects=True)
+    response = session.get(
+        challenge_page_url, timeout=_connect_read_timeout(timeout, deadline, "challenge_fetch"), allow_redirects=True
+    )
     challenge = _extract_anubis_challenge(getattr(response, "text", ""))
     if not challenge:
         return None
@@ -813,13 +853,15 @@ def solve_anubis_challenge(session, challenge_url, original_url, timeout=HTTP_TI
         redirect_url = challenge["redirect_url"]
         if not redirect_url.startswith("http"):
             redirect_url = base + redirect_url
-        time.sleep(challenge.get("delay", 1))
-        solved = session.get(redirect_url, timeout=(10, timeout), allow_redirects=True)
+        _budget_sleep(challenge.get("delay", 1), deadline, "pass_submit")
+        solved = session.get(
+            redirect_url, timeout=_connect_read_timeout(timeout, deadline, "pass_submit"), allow_redirects=True
+        )
         if getattr(solved, "cookies", None):
             session.cookies.update(solved.cookies)
     elif method == "preact":
         result, delay = _solve_preact(challenge["randomData"], challenge["difficulty"])
-        time.sleep(delay)
+        _budget_sleep(delay, deadline, "pass_submit")
         params = {
             "id": challenge["id"],
             "result": result,
@@ -828,13 +870,13 @@ def solve_anubis_challenge(session, challenge_url, original_url, timeout=HTTP_TI
         }
         solved = session.get(
             f"{base}/.within.website/x/cmd/anubis/api/pass-challenge?{urllib.parse.urlencode(params)}",
-            timeout=(10, timeout),
+            timeout=_connect_read_timeout(timeout, deadline, "pass_submit"),
             allow_redirects=False,
         )
         if getattr(solved, "cookies", None):
             session.cookies.update(solved.cookies)
     else:
-        nonce, digest = _solve_pow(challenge["randomData"], challenge["difficulty"])
+        nonce, digest = _solve_pow(challenge["randomData"], challenge["difficulty"], deadline=deadline)
         params = {
             "id": challenge["id"],
             "response": digest,
@@ -844,7 +886,7 @@ def solve_anubis_challenge(session, challenge_url, original_url, timeout=HTTP_TI
         }
         solved = session.get(
             f"{base}/.within.website/x/cmd/anubis/api/pass-challenge?{urllib.parse.urlencode(params)}",
-            timeout=(10, timeout),
+            timeout=_connect_read_timeout(timeout, deadline, "pass_submit"),
             allow_redirects=False,
         )
         if getattr(solved, "cookies", None):

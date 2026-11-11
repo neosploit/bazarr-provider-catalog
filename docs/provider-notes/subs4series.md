@@ -24,6 +24,7 @@
 - Preserves uploader, download count, year, release info, and episode scoring signals.
 - Runs the same anti-block endpoints before posting the download request.
 - Uses ai-cloudscraper first, solves inline Anubis `/.within.website/` challenges, and keeps optional FlareSolverr fallback when Cloudflare blocks the worker egress IP.
+- One site call, an Anubis solve included, has a 60-second budget, as in subs4free: each challenge request, the proof of work and any wait the challenge asks for get only what is left of it. Running out raises `ServiceUnavailable` once, with no retry, which keeps the call inside the host's 120-second worker timeout.
 - Supports direct subtitle bodies, ZIP archives, and RAR archives through the bundled `py7zz` dependency.
 
 ## Cloudflare Handling
