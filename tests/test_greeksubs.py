@@ -214,6 +214,37 @@ class GreekSubsProviderTests(unittest.TestCase):
         self.assertEqual(result["content_sha256"], hashlib.sha256(decoded).hexdigest())
         self.assertFalse(result["empty"])
 
+    def test_download_returns_a_utf16_subtitle_as_utf8_with_single_line_breaks(self):
+        # Shaped like the live "Gladiator (2000) EXTENDED" upload: UTF-16 with a BOM and CRLF.
+        # It used to come back declared latin-1, with every line break doubled.
+        text = "1\r\n00:01:04,607 --> 00:01:07,234\r\nΣTO AΠOΓEIO THΣ ΔOΞΑΣ THΣ,\r\n\r\n2\r\n00:01:08,000 --> 00:01:09,000\r\nΆκου.\r\n"
+        expected = text.replace("\r\n", "\n")
+        for codec in ("utf-16", "utf-16-be"):
+            with self.subTest(codec=codec):
+                body = text.encode(codec) if codec == "utf-16" else b"\xfe\xff" + text.encode(codec)
+                provider = self.mod.GreekSubsProvider()
+                provider._http_fetch = lambda *args, **kwargs: self.mod.HttpResponse(
+                    200, body, _headers("application/octet-stream", 'attachment; filename="gladiator.srt"')
+                )
+
+                result = provider.download(
+                    {"download_url": "https://greeksubs.net/dll/x/0/code", "page_url": "https://greeksubs.net/en/view/tt0172495"},
+                    {"alpha3": "ell", "alpha2": "el"},
+                    {},
+                )
+
+                decoded = base64.b64decode(result["content_b64"])
+                self.assertEqual(result["encoding"], "utf-8")
+                self.assertEqual(decoded.decode("utf-8"), expected)
+                self.assertEqual(result["content_sha256"], hashlib.sha256(decoded).hexdigest())
+
+    def test_utf8_from_wide_unicode_handles_utf32_and_leaves_other_bytes_alone(self):
+        self.assertEqual(self.mod._utf8_from_wide_unicode("Άκου\r\n".encode("utf-32")), "Άκου\r\n".encode("utf-8"))
+        cp1253 = "Άκου\r\n".encode("windows-1253")
+        self.assertEqual(self.mod._utf8_from_wide_unicode(cp1253), cp1253)
+        broken = b"\xff\xfe\x00\xd8"  # a UTF-16 BOM followed by a lone surrogate
+        self.assertEqual(self.mod._utf8_from_wide_unicode(broken), broken)
+
     def test_download_posts_legacy_gate_fields_and_returns_subtitle_payload(self):
         provider = self.mod.GreekSubsProvider()
         subtitle = b"1\r\n00:00:01,000 --> 00:00:02,000\r\nGreek line\r\n"

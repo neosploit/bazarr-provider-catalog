@@ -1,6 +1,7 @@
 """GreekSubs.net provider for the Bazarr+ Provider Hub catalog."""
 
 import base64
+import codecs
 import email.message
 import hashlib
 import html
@@ -341,7 +342,7 @@ class GreekSubsProvider:
             if fetched is None:
                 raise ValueError("greeksubs refused the download even after a token refresh")
         subtitle_body, served_name = fetched
-        normalized = _normalize_line_endings(subtitle_body)
+        normalized = _normalize_line_endings(_utf8_from_wide_unicode(subtitle_body))
         if not normalized:
             raise ValueError("greeksubs download returned an empty subtitle")
         subtitle_format = _subtitle_format(served_name or payload.get("filename") or "")
@@ -599,6 +600,31 @@ def _header_value(headers, name):
         if str(key).lower() == wanted:
             return str(value or "")
     return ""
+
+
+# UTF-32 first: its little-endian BOM starts with the UTF-16 one.
+_WIDE_UNICODE_BOMS = (
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+)
+
+
+def _utf8_from_wide_unicode(content):
+    """UTF-8 bytes for a subtitle served as UTF-16 or UTF-32 with a BOM, else the bytes as given.
+
+    Some GreekSubs.net uploads are UTF-16 ("Gladiator (2000) EXTENDED"). Neither Greek
+    codepage decodes them, so they were reported as latin-1, and line endings normalized on
+    the raw bytes turned each "\\r\\x00\\n\\x00" into two line breaks.
+    """
+    for bom, codec in _WIDE_UNICODE_BOMS:
+        if content.startswith(bom):
+            try:
+                return content.decode(codec).encode("utf-8")
+            except UnicodeDecodeError:
+                return content
+    return content
 
 
 def _normalize_line_endings(content):

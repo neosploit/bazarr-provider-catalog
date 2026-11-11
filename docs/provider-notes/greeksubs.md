@@ -11,10 +11,11 @@ GreekSubs.net is a Greek-only movie and episode subtitle source. It is not the s
 - A `secCode` is single-use and bound to the `PHPSESSID` session that loaded the page. A valid one makes the `/dll/` GET serve the subtitle file itself (`Content-Disposition: attachment`); a used or foreign-session one gets a 302 to the home page. The gate GET does not follow redirects, so that refusal is recognized.
 - The older gate page, whose hidden form fields had to be POSTed back for the bytes, is still handled if GreekSubs.net serves it.
 - When the token is refused (a cached search result, an earlier download, another worker's session), reloads only the stored GreekSubs.net detail page in the current session, confirms the same subtitle id is still listed, then retries once with the new token.
-- Reports non-UTF-8 subtitles as `windows-1253` (or `iso-8859-7`), not `latin-1`, so Greek text decodes correctly.
+- Reports non-UTF-8 subtitles as `windows-1253`, or `iso-8859-7` when `windows-1253` cannot decode them, not `latin-1`, so Greek text decodes correctly. In a live sample of 58 GreekSubs.net subtitles, 43 were `windows-1253` and 14 UTF-8.
+- Converts a subtitle served as UTF-16 or UTF-32 with a BOM to UTF-8 before normalizing its line endings. The one UTF-16 file in that sample ("Gladiator (2000) EXTENDED") used to be reported as `latin-1`, with every line break doubled.
 - Preserves uploader, download count, release info, and movie/episode match signals in Provider Hub result payloads.
 
 ## Validation Targets
 
-- Fixture tests cover movie parsing, episode page selection, language filtering, titles and episodes the site lacks, direct and legacy-form downloads, and bounded refresh of a refused token against the matching detail-page row.
+- Fixture tests cover movie parsing, episode page selection, language filtering, titles and episodes the site lacks, UTF-16 subtitles, direct and legacy-form downloads, and bounded refresh of a refused token against the matching detail-page row.
 - Live smoke should use Greek language (`ell`) and a video with a current IMDb id on greeksubs.net.
