@@ -917,6 +917,27 @@ class Subs4SeriesProviderTests(unittest.TestCase):
         self.assertEqual(calls["sleeps"], [])
         self.assertEqual(calls["posts"][0][1]["g-recaptcha-response"], "solved-token")
 
+    def test_download_tells_the_solver_whether_the_recaptcha_is_invisible(self):
+        # The live gate is a visible v2 checkbox; the solver used to be told it was invisible.
+        invisible_gate = CAPTCHA_DOWNLOAD_HTML.replace(b'class="g-recaptcha"', b'class="g-recaptcha" data-size="invisible"', 1)
+        self.assertNotEqual(invisible_gate, CAPTCHA_DOWNLOAD_HTML)
+        for gate, expected in ((CAPTCHA_DOWNLOAD_HTML, False), (invisible_gate, True)):
+            with self.subTest(invisible=expected):
+                payloads = []
+
+                def raw_stub(self, url, method="GET", data=None, headers=None, timeout=15):
+                    del self, url, method, headers, timeout
+                    payloads.append(json.loads(data.decode("utf-8")))
+                    return b'{"token": "solved"}'
+
+                with patch.object(self.mod.Subs4SeriesProvider, "_raw_request", raw_stub):
+                    result, calls = self._gated_download([gate], config={"captcha_solver_url": "http://solver.local/solve"})
+
+                self.assertEqual(payloads[0]["invisible"], expected)
+                self.assertEqual(payloads[0]["site_key"], "site-key-123")
+                self.assertEqual(calls["posts"][0][1]["g-recaptcha-response"], "solved")
+                self.assertEqual(base64.b64decode(result["archive_b64"]), _zip_body())
+
     def test_download_fails_clearly_when_the_solver_returns_no_token(self):
         provider_raw = []
 

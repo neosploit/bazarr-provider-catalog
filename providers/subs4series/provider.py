@@ -442,7 +442,7 @@ class Subs4SeriesProvider:
         post_url = _absolute_url(form_action) if form_action else getsub_url
         data = {"my_recaptcha_challenge_field": "manual_challenge"}
         if captcha_required:
-            captcha_response = self._captcha_response(site_key, getsub_url, config)
+            captcha_response = self._captcha_response(site_key, getsub_url, config, invisible=_captcha_is_invisible(gate_text))
             if not captcha_response:
                 raise ValueError("subs4series captcha solver returned no response token for the reCAPTCHA gate")
             data["g-recaptcha-response"] = captcha_response
@@ -550,7 +550,7 @@ class Subs4SeriesProvider:
             _sleep(config)
             self._http_get(url, referer=referer, config=config)
 
-    def _captcha_response(self, site_key, page_url, config):
+    def _captcha_response(self, site_key, page_url, config, invisible=False):
         if config.get("captcha_response"):
             return str(config["captcha_response"])
         solver_url = _coerce_text(config.get("captcha_solver_url"))
@@ -561,7 +561,7 @@ class Subs4SeriesProvider:
             "site_key": site_key,
             "site_url": page_url,
             "url": page_url,
-            "invisible": True,
+            "invisible": invisible,
         }
         timeout = max(1, int(config.get("captcha_solver_timeout_ms") or 30000) / 1000)
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -1180,6 +1180,18 @@ def _form_download_target(text):
 
 def _has_captcha(text):
     return bool(_captcha_site_key(text) or "g-recaptcha" in text or "grecaptcha" in text)
+
+
+def _captcha_is_invisible(text):
+    """Whether the gate's reCAPTCHA is the invisible kind, which a solver handles differently.
+
+    The live getSub gate is a visible v2 checkbox (a plain g-recaptcha div); an invisible one
+    is marked data-size="invisible" or run through grecaptcha.execute().
+    """
+    widget = re.search(r"<[^>]*\bg-recaptcha\b[^>]*>", text, re.I)
+    if widget and re.search(r"""data-size=["']invisible["']""", widget.group(0), re.I):
+        return True
+    return "grecaptcha.execute" in text
 
 
 def _captcha_configured(config):

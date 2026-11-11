@@ -41,13 +41,13 @@ Successful FlareSolverr cookies and User-Agent are reused for later requests in 
 Legacy Bazarr solved Subs4Series reCAPTCHA through process-global anti-captcha settings. Provider Hub workers do not inherit that Bazarr process environment, so this plugin exposes explicit settings instead:
 
 - `captcha_response`: a pre-solved response token.
-- `captcha_solver_url`: optional helper endpoint that receives `site_key`, `site_url`, `url`, `provider`, and `invisible`.
+- `captcha_solver_url`: optional helper endpoint that receives `site_key`, `site_url`, `url`, `provider`, and `invisible` (true only for an invisible reCAPTCHA; the live gate is a visible checkbox).
 - `captcha_solver_token`: optional bearer token for that helper endpoint.
 - `captcha_solver_timeout_ms`: timeout for the helper endpoint.
 
-The reCAPTCHA gate on the getSub page used to guard every download. In November 2026 the getSub page answered with the archive directly in 10 of 11 live fetches, and the one gated subtitle downloaded without a captcha a few minutes later. So a solver is optional:
+The reCAPTCHA gate on the getSub page used to guard every download. In November 2026 the getSub page answered with the archive directly in 10 of 11 live fetches, and the one gated subtitle downloaded without a captcha a few minutes later. The gate also follows the client IP: the next day, after a day of heavy testing, one IP got it on every download, still after an hour with no requests, while a phone browser on mobile data opened the same download without one. The gate is a visible reCAPTCHA v2 checkbox, and the solver is told whether the widget is invisible. So a solver is optional:
 
 - With a solver or `captcha_response` set, a gated download is solved and posted at once.
 - Without one, the worker waits 5 seconds, reloads the detail page for a fresh getSub token and tries once more.
-- If the gate is still there, the worker raises `APIThrottled`, naming the page title. The host sits the provider out and retries later, instead of counting a broken download.
+- If the gate is still there, the worker raises `APIThrottled`, naming the page title. The host sits the provider out and retries later, instead of counting a broken download. For an IP the site has flagged, that can repeat for hours.
 - A configured solver that returns no token fails with a clear captcha error, instead of silently returning empty content.
