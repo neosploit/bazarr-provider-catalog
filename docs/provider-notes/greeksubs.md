@@ -6,6 +6,7 @@ GreekSubs.net is a Greek-only movie and episode subtitle source. It is not the s
 
 - Looks up movie pages by movie IMDb id at `/en/view/<ttid>`.
 - Looks up episode pages through the series IMDb page and the matching Season/Episode link.
+- GreekSubs.net answers `404` for a title or episode it does not carry. The search returns no results for it rather than failing, since the SDK counts a valid empty response as a success. Any other HTTP error still fails the search.
 - Extracts `secCode` and one-use subtitle ids from the page before building `/dll/<subtitle_id>/0/<secCode>` download URLs.
 - A `secCode` is single-use and bound to the `PHPSESSID` session that loaded the page. A valid one makes the `/dll/` GET serve the subtitle file itself (`Content-Disposition: attachment`); a used or foreign-session one gets a 302 to the home page. The gate GET does not follow redirects, so that refusal is recognized.
 - The older gate page, whose hidden form fields had to be POSTed back for the bytes, is still handled if GreekSubs.net serves it.
@@ -15,5 +16,5 @@ GreekSubs.net is a Greek-only movie and episode subtitle source. It is not the s
 
 ## Validation Targets
 
-- Fixture tests cover movie parsing, episode page selection, language filtering, direct and legacy-form downloads, and bounded refresh of a refused token against the matching detail-page row.
+- Fixture tests cover movie parsing, episode page selection, language filtering, titles and episodes the site lacks, direct and legacy-form downloads, and bounded refresh of a refused token against the matching detail-page row.
 - Live smoke should use Greek language (`ell`) and a video with a current IMDb id on greeksubs.net.

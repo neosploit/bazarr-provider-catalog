@@ -443,6 +443,79 @@ class _FakeResponse:
         return False
 
 
+class GreekSubsMissingTitleTests(unittest.TestCase):
+    # GreekSubs answers 404 for a title or episode it does not carry.
+    def setUp(self):
+        self.mod = _load_provider_module()
+
+    def _search(self, video, pages):
+        provider = self.mod.GreekSubsProvider()
+        requests = []
+
+        def stub(url, data=None, timeout=20, referer=None):
+            del data, timeout, referer
+            requests.append(url)
+            page = pages.get(url, 404)
+            if isinstance(page, int):
+                raise urllib.error.HTTPError(url, page, "error", {}, None)
+            return page
+
+        provider._http_request = stub
+        return provider.search(video, [{"alpha3": "ell", "alpha2": "el"}], {}), requests
+
+    def test_search_returns_nothing_for_a_movie_the_site_lacks(self):
+        results, requests = self._search({"kind": "movie", "title": "Nonexistent", "imdb_id": "tt9999999"}, {})
+
+        self.assertEqual(results, [])
+        self.assertEqual(requests, ["https://greeksubs.net/en/view/tt9999999"])
+
+    def test_search_returns_nothing_for_a_series_the_site_lacks(self):
+        # The British Shameless, which GreekSubs does not carry.
+        results, _requests = self._search(
+            {"kind": "episode", "series": "Shameless", "series_imdb_id": "tt0377260", "season": 1, "episode": 1},
+            {},
+        )
+
+        self.assertEqual(results, [])
+
+    def test_search_returns_nothing_when_the_episode_page_is_missing(self):
+        episode_url = "https://greeksubs.net/en/view/tt1480055/subtitle-for-game-of-thrones-winter-is-coming-season-1-episode-1"
+        results, requests = self._search(
+            {"kind": "episode", "series": "Game of Thrones", "series_imdb_id": "tt0944947", "season": 1, "episode": 1},
+            {"https://greeksubs.net/en/view/tt0944947": SERIES_HTML},
+        )
+
+        self.assertEqual(results, [])
+        self.assertEqual(requests, ["https://greeksubs.net/en/view/tt0944947", episode_url])
+
+    def test_search_returns_nothing_when_the_episode_fallback_page_is_missing(self):
+        # S01E03 is not linked from the series page, so the episode's own IMDb page is tried.
+        results, requests = self._search(
+            {
+                "kind": "episode",
+                "series": "Game of Thrones",
+                "series_imdb_id": "tt0944947",
+                "imdb_id": "tt1480057",
+                "season": 1,
+                "episode": 3,
+            },
+            {"https://greeksubs.net/en/view/tt0944947": SERIES_HTML},
+        )
+
+        self.assertEqual(results, [])
+        self.assertEqual(requests[-1], "https://greeksubs.net/en/view/tt1480057")
+
+    def test_search_still_raises_other_http_errors(self):
+        for code in (403, 500):
+            with self.subTest(code=code):
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    self._search(
+                        {"kind": "movie", "title": "Dune", "imdb_id": "tt1160419"},
+                        {"https://greeksubs.net/en/view/tt1160419": code},
+                    )
+                self.assertEqual(raised.exception.code, code)
+
+
 class GreekSubsTransportRetryTests(unittest.TestCase):
     def setUp(self):
         self.mod = _load_provider_module()

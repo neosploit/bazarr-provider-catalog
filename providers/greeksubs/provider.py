@@ -233,6 +233,17 @@ class GreekSubsProvider:
         self._opener = urllib.request.build_opener(cookies)
         self._no_redirect_opener = urllib.request.build_opener(cookies, _NoRedirectHandler())
 
+    def _view_page(self, url, referer=None):
+        # GreekSubs answers 404 for a title or episode it does not carry. That is an empty
+        # result, not a failed search: the SDK counts a valid empty response as a success.
+        # Every other error still raises.
+        try:
+            return self._http_request(url, referer=referer)
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                return None
+            raise
+
     def _http_request(self, url, data=None, timeout=HTTP_TIMEOUT_SECONDS, referer=None):
         return self._http_fetch(url, data=data, timeout=timeout, referer=referer).body
 
@@ -280,7 +291,9 @@ class GreekSubsProvider:
         config = config or {}
         start_url = f"{BASE_URL}/en/view/{imdb_id}"
         _sleep(config)
-        start_body = self._http_request(start_url)
+        start_body = self._view_page(start_url)
+        if start_body is None:
+            return []
         page_url = start_url
         page_body = start_body
         if kind == "episode":
@@ -288,11 +301,13 @@ class GreekSubsProvider:
             if episode_page_url:
                 _sleep(config)
                 page_url = episode_page_url
-                page_body = self._http_request(page_url, referer=start_url)
+                page_body = self._view_page(page_url, referer=start_url)
             elif video.get("imdb_id") and _normalize_imdb_id(video.get("imdb_id")) != imdb_id:
                 _sleep(config)
                 page_url = f"{BASE_URL}/en/view/{_normalize_imdb_id(video.get('imdb_id'))}"
-                page_body = self._http_request(page_url, referer=start_url)
+                page_body = self._view_page(page_url, referer=start_url)
+            if page_body is None:
+                return []
         page = parse_subtitle_page(page_body, page_url)
         if not page["sec_code"]:
             return []
