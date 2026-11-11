@@ -387,6 +387,47 @@ class GreekSubsProviderTests(unittest.TestCase):
         self.assertEqual(calls[3][2], fresh_url)
         self.assertEqual(base64.b64decode(result["content_b64"]), b"1\n00:00:01,000 --> 00:00:02,000\nGreek line\n")
 
+    def test_download_refreshes_the_token_when_the_legacy_post_is_refused(self):
+        # A refused POST used to be followed to the home page, whose HTML came back as the subtitle.
+        page_url = "https://greeksubs.net/en/view/tt1480055/subtitle-for-game-of-thrones-winter-is-coming-season-1-episode-1"
+        stale_url = "https://greeksubs.net/dll/kDCtQ-5a72ef1d3756e/0/stale-token"
+        fresh_url = "https://greeksubs.net/dll/kDCtQ-5a72ef1d3756e/0/dZCzW0PjQ"
+        subtitle = b"1\r\n00:00:01,000 --> 00:00:02,000\r\nGreek line\r\n"
+        refusals = {
+            "redirect": self.mod.HttpResponse(302, b"", _headers("text/html", location="https://greeksubs.net/")),
+            "html page": self.mod.HttpResponse(200, b"<!DOCTYPE html><html>home</html>", _headers("text/html")),
+        }
+        for kind, refusal in refusals.items():
+            with self.subTest(refusal=kind):
+                provider = self.mod.GreekSubsProvider()
+                calls = []
+
+                def stub(url, data=None, timeout=20, referer=None, allow_redirects=True, refusal=refusal):
+                    del timeout, referer
+                    calls.append((url, data is not None, allow_redirects))
+                    if data is None and url in (stale_url, fresh_url):
+                        return self.mod.HttpResponse(200, DOWNLOAD_GATE_HTML, _headers("text/html"))
+                    if data is None and url == page_url:
+                        return self.mod.HttpResponse(200, EPISODE_HTML, _headers("text/html"))
+                    if data is not None and url == stale_url:
+                        return refusal
+                    if data is not None and url == fresh_url:
+                        return self.mod.HttpResponse(200, subtitle, _headers("application/octet-stream"))
+                    raise AssertionError(f"unexpected URL: {url}")
+
+                provider._http_fetch = stub
+                result = provider.download(
+                    {"download_url": stale_url, "page_url": page_url, "subtitle_id": "kDCtQ-5a72ef1d3756e", "filename": "got.srt"},
+                    {"alpha3": "ell", "alpha2": "el"},
+                    {},
+                )
+
+                self.assertEqual(
+                    calls,
+                    [(stale_url, False, False), (stale_url, True, False), (page_url, False, True), (fresh_url, False, False), (fresh_url, True, False)],
+                )
+                self.assertEqual(base64.b64decode(result["content_b64"]), b"1\n00:00:01,000 --> 00:00:02,000\nGreek line\n")
+
     def test_download_gives_up_when_refreshed_token_is_refused_too(self):
         provider = self.mod.GreekSubsProvider()
         page_url = "https://greeksubs.net/en/view/tt1480055/subtitle-for-game-of-thrones-winter-is-coming-season-1-episode-1"

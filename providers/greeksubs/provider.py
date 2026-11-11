@@ -364,8 +364,12 @@ class GreekSubsProvider:
         except ValueError:
             return None
         post_body = urllib.parse.urlencode(form).encode("ascii")
-        subtitle_body = self._http_request(download_url, data=post_body, referer=download_url)
-        return subtitle_body, form.get("output") or ""
+        posted = self._http_fetch(download_url, data=post_body, referer=download_url, allow_redirects=False)
+        # A refused POST is a redirect, like a refused GET, or an HTML page; either way it is
+        # not the subtitle, and the caller refreshes the token instead.
+        if 300 <= posted.status < 400 or _looks_like_html(posted):
+            return None
+        return posted.body, form.get("output") or _response_filename(posted)
 
     def _refresh_download_url(self, payload, page_url, stale_download_url):
         subtitle_id = str(payload.get("subtitle_id") or "").strip()
