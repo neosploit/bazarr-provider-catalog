@@ -92,7 +92,7 @@ No wheels, sdists, native files, symlinks, vendored dependencies, or app-environ
 - `bundle_sha256`: deterministic hash over declared Python files.
 - `source`: GitHub repo, ref, commit, catalog path, and trust metadata.
 - `dependencies.requirements`: optional hash-locked PyPI wheels.
-- `anti_captcha`: `true` when the provider can meet a reCAPTCHA it needs solved. The host then offers it the user's anti-captcha service, see [Captcha Solving](#captcha-solving).
+- `anti_captcha`: `true` when the provider can meet a reCAPTCHA (v2 or v3) it needs solved. The host then offers it the user's anti-captcha service, see [Captcha Solving](#captcha-solving).
 
 ## Auth And Settings
 
@@ -173,10 +173,20 @@ Content-Type: application/json
 
 - `site_key`: the reCAPTCHA site key from the page.
 - `site_url`: the page the captcha is on. `url` is accepted as an alias.
-- `invisible`: `true` for an invisible reCAPTCHA. Optional, `false` by default.
+- `invisible`: `true` for an invisible reCAPTCHA v2. Optional, `false` by default.
 - `provider`: the provider id, used in the host's log.
+- `type`: `recaptcha_v2` or `recaptcha_v3`. Optional, `recaptcha_v2` by default.
 
-The body is at most 4 KB. On success the reply is `200 {"token": "<g-recaptcha-response>"}`. Submit the token as the form's `g-recaptcha-response` field. Any other status carries `{"error": "<reason>"}`:
+A reCAPTCHA v3 has no widget: the page's script calls `grecaptcha.execute(site_key, {action: ...})` and the site grades the token with a score. Send the same action, and the lowest score the site accepts:
+
+```json
+{"provider": "myprovider", "type": "recaptcha_v3", "site_key": "6Lc...", "site_url": "https://example.org/login", "action": "login", "min_score": 0.7}
+```
+
+- `action`: the action name from the page's `grecaptcha.execute` call. Letters, digits, `_` and `/`. Optional, `verify` by default.
+- `min_score`: from `0.1` to `0.9`. Optional, `0.3` by default. Anti-Captcha takes only `0.3`, `0.7` and `0.9`, so the host rounds up to one of them for it.
+
+The body is at most 4 KB. On success the reply is `200 {"token": "<g-recaptcha-response>"}`. Submit a v2 token as the form's `g-recaptcha-response` field, and a v3 token wherever the page's script would put it, often a hidden form field. Any other status carries `{"error": "<reason>"}`:
 
 | Status | Meaning |
 |---|---|
@@ -187,7 +197,7 @@ The body is at most 4 KB. On success the reply is `200 {"token": "<g-recaptcha-r
 | 502 | The vendor failed or did not solve the captcha. |
 | 503 | No anti-captcha service is configured any more. |
 
-Only reCAPTCHA v2 is solved, visible or invisible. An hCaptcha or an image captcha gets a 400 or a 502, not a token. Each solve costs the user money, so ask only when the page really shows a captcha, and ask once per gate. A 429 or a 503 is temporary: raising `APIThrottled` lets the host sit the provider out and retry later, instead of counting a broken download. `_captcha_response` in `providers/subs4series/provider.py` shows the request side.
+Only reCAPTCHA is solved: v2, visible or invisible, and v3. Any other `type`, such as `hcaptcha`, gets a 400 before it reaches the vendor, and an hCaptcha site key sent without a `type` is taken for a reCAPTCHA v2 and gets a 502. Each solve costs the user money, so ask only when the page really shows a captcha, and ask once per gate. A 429 or a 503 is temporary: raising `APIThrottled` lets the host sit the provider out and retry later, instead of counting a broken download. `_captcha_response` in `providers/subs4series/provider.py` shows the request side.
 
 Hosts without this feature never add the keys, so the provider must still work, or fail clearly, when `captcha_solver_url` is empty.
 
