@@ -674,8 +674,11 @@ class Subs4FreeProvider:
             return urllib.request.Request(url, data=encoded, headers=headers, method="POST")
 
         # A POST interrupted by a challenge is re-sent once the gate clears; the pass
-        # endpoint redirects back to the page the form lives on.
-        return self._open_with_anubis(build, url, timeout, redir_url=referer)
+        # endpoint redirects back to the page the form lives on. A failed gate here never
+        # renews the identity: getSub.php only serves a session that has opened the
+        # subtitle's page, so a POST from a new session bounces to that page and would be
+        # misread as the anti-flood penalty.
+        return self._open_with_anubis(build, url, timeout, redir_url=referer, renew_identity=False)
 
     def _fetch(self, request, timeout, opener=None):
         # Return error bodies too: a gate can ride on a 401/403 and must still be read.
@@ -696,7 +699,7 @@ class Subs4FreeProvider:
                 body = b""
             return error.code, error.geturl() or request.full_url, body
 
-    def _open_with_anubis(self, build_request, url, timeout, redir_url=None):
+    def _open_with_anubis(self, build_request, url, timeout, redir_url=None, renew_identity=True):
         # Only a failed gate on www.subs4free.info renews the identity and retries. Every
         # request targets that host today; a gate on any other host (one a redirect lands
         # on) gets one attempt, so it can never wipe the clearance cookie the getSub.php
@@ -707,7 +710,7 @@ class Subs4FreeProvider:
         if self._operation_deadline is not None:
             deadline = min(deadline, self._operation_deadline)
         try:
-            return self._open_attempts(build_request, url, timeout, redir_url, deadline)
+            return self._open_attempts(build_request, url, timeout, redir_url, deadline, renew_identity)
         except (TimeoutError, urllib.error.URLError) as error:
             # Each request timeout is clipped to what is left of the budget, so a timeout
             # that fires at or past the deadline is the budget running out, not the site.
@@ -715,8 +718,8 @@ class Subs4FreeProvider:
                 raise
             raise _budget_exhausted("request") from error
 
-    def _open_attempts(self, build_request, url, timeout, redir_url, deadline):
-        attempts = CHALLENGE_RETRY_ATTEMPTS if _renews_identity(url) else 1
+    def _open_attempts(self, build_request, url, timeout, redir_url, deadline, renew_identity):
+        attempts = CHALLENGE_RETRY_ATTEMPTS if renew_identity and _renews_identity(url) else 1
         for attempt in range(1, attempts + 1):
             status, landed, body = self._fetch(build_request(), _request_timeout(timeout, deadline, "resource_fetch"))
             if status == 429:

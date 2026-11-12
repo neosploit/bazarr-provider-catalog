@@ -719,6 +719,34 @@ class Subs4FreeAnubisTests(unittest.TestCase):
         self.assertEqual(body, b"PK-archive")
         self.assertEqual(methods, ["POST", "GET", "POST"])
 
+    def test_failed_gate_on_the_download_post_keeps_the_session(self):
+        # getSub.php only serves a session that has opened the subtitle's page (checked
+        # live: a new session's POST bounces to the detail page, the same session's POST
+        # gets the archive). A failed gate on the POST must not renew the identity, which
+        # would turn it into a false APIThrottled; it raises ServiceUnavailable instead.
+        provider = self.mod.Subs4FreeProvider()
+        provider._cookie_jar.set_cookie(_anubis_auth_cookie())
+        jar = provider._cookie_jar
+        posts = []
+
+        def fetch(request, timeout, opener=None):
+            del timeout, opener
+            if "pass-challenge" in request.full_url:
+                return 403, request.full_url, b""
+            posts.append(request.get_method())
+            return 200, request.full_url, CHALLENGE_HTML
+
+        provider._fetch = fetch
+        with self.assertRaises(self.mod.ServiceUnavailable):
+            provider._http_post(
+                self.mod.DOWNLOAD_URL,
+                {"id": "1", "x": "2", "y": "3"},
+                referer="https://www.subs4free.info/greek-subtitles/abc/inception",
+            )
+        self.assertIs(provider._cookie_jar, jar)
+        self.assertTrue(provider._has_anubis_auth("www.subs4free.info"))
+        self.assertEqual(posts, ["POST"])
+
     def test_failed_solves_renew_identity_then_raise(self):
         provider = self.mod.Subs4FreeProvider()
         jars = []
