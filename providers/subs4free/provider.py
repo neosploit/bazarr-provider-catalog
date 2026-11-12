@@ -697,11 +697,12 @@ class Subs4FreeProvider:
             return error.code, error.geturl() or request.full_url, body
 
     def _open_with_anubis(self, build_request, url, timeout, redir_url=None):
-        # Only a failed gate on www.subs4free.info renews the identity and retries. A gate
-        # on any other host (another subs4free.info host or a third-party page) gets one
-        # attempt, so it can never wipe the clearance cookie the getSub.php POST needs. Running out of the call budget raises ServiceUnavailable
-        # from wherever it happens and is not retried: a new identity cannot make the
-        # proof of work cheaper.
+        # Only a failed gate on www.subs4free.info renews the identity and retries. Every
+        # request targets that host today; a gate on any other host (one a redirect lands
+        # on) gets one attempt, so it can never wipe the clearance cookie the getSub.php
+        # POST needs. Running out of the call budget raises ServiceUnavailable from
+        # wherever it happens and is not retried: a new identity cannot make the proof of
+        # work cheaper.
         deadline = time.monotonic() + SITE_CALL_BUDGET_SECONDS
         if self._operation_deadline is not None:
             deadline = min(deadline, self._operation_deadline)

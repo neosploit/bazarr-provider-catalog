@@ -737,7 +737,8 @@ class Subs4FreeAnubisTests(unittest.TestCase):
         self.assertEqual(len(jars), self.mod.CHALLENGE_RETRY_ATTEMPTS)
 
     def test_off_site_gate_keeps_the_site_identity(self):
-        # A failed gate on a third-party host must not wipe the subs4free.info
+        # A failed gate on a third-party host (one a redirect lands on; the provider no
+        # longer requests subs4series.com itself) must not wipe the subs4free.info
         # clearance cookie.
         provider = self.mod.Subs4FreeProvider()
         jar = provider._cookie_jar
@@ -753,10 +754,11 @@ class Subs4FreeAnubisTests(unittest.TestCase):
             provider._http_get("https://www.subs4series.com/includes/anti-block.php")
         self.assertIs(provider._cookie_jar, jar)
 
-    def test_failed_gate_on_images_host_keeps_the_site_identity(self):
-        # images.subs4free.info runs its own Anubis gate. Renewing the identity on a failed
-        # gate there would wipe the www clearance cookie right before the getSub.php POST,
-        # which would then bounce to the detail page and read as the anti-flood penalty.
+    def test_failed_gate_on_another_subs4free_host_keeps_the_site_identity(self):
+        # Another subs4free.info host, such as images.subs4free.info with its own Anubis
+        # gate, is no longer requested, but a redirect could still land there. Renewing the
+        # identity on a failed gate would wipe the www clearance cookie the getSub.php POST
+        # needs; the POST would then bounce to the detail page and read as the penalty.
         provider = self.mod.Subs4FreeProvider()
         provider._cookie_jar.set_cookie(_anubis_auth_cookie())
         jar = provider._cookie_jar
