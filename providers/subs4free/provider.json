@@ -1,9 +1,17 @@
 {
   "api_version": "bazarr.provider-hub.v1",
-  "bundle_sha256": "d6eda972dc2b016dd8df156be2fd87ce6877e4347563e3067c38df13b2610411",
+  "bundle_sha256": "0b0f6dfb68e24aa84ce0dbcd182e678d58dfe4234a622b4f60f7de063958a6c4",
   "config_schema": {
     "additionalProperties": false,
     "properties": {
+      "operation_timeout_seconds": {
+        "default": 90,
+        "description": "Longest a search or download may take, Anubis solves and request delays included. Bazarr gives the provider at least 30 seconds more than this, so it stops on its own and reports the site as unavailable instead of being cut off.",
+        "maximum": 600,
+        "minimum": 30,
+        "title": "Search/download timeout (seconds)",
+        "type": "integer"
+      },
       "request_delay_ms": {
         "default": 0,
         "description": "Optional politeness delay between HTTP calls to subs4free.info.",
@@ -30,7 +38,7 @@
   "entry_class": "Subs4FreeProvider",
   "entry_module": "provider",
   "files": {
-    "provider.py": "265cbbfeb8d6521575989b284373775b310b78eb57d65ed91f4fc8e26d55717c"
+    "provider.py": "563e88cd2978d74f4c71e5aaa17887bd7a857eab404d7c8730c582c6969294ad"
   },
   "languages": [
     "ell",

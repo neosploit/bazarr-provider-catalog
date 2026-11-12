@@ -1,6 +1,7 @@
 """Subs4Free provider for the Bazarr+ Provider Hub catalog."""
 
 import base64
+import contextlib
 import datetime
 import email.utils
 import hashlib
@@ -36,9 +37,18 @@ HTTP_TIMEOUT_SECONDS = 15
 # a proof-of-work challenge until the session holds a *-anubis-auth cookie. Solve inline,
 # and on a failed solve renew the browser identity (UA + cookies) before trying again.
 CHALLENGE_RETRY_ATTEMPTS = 3
-# One site call, all attempts, solves and backoff included, stays well inside the host's
-# 120 s worker timeout. Running out aborts the call; it is never retried.
+# One site call, all attempts, solves and backoff included. Running out aborts the call;
+# it is never retried.
 SITE_CALL_BUDGET_SECONDS = 60
+# One search or download, every site call and request delay included, gets the
+# operation_timeout_seconds config value. The host reads every *_timeout_seconds key and
+# gives the worker that much plus 30 s (and never less than its own worker timeout), so
+# the provider stops first and reports ServiceUnavailable, instead of the host killing the
+# worker and backing the provider off for an hour. A search that runs out after finding
+# results returns them.
+DEFAULT_OPERATION_TIMEOUT_SECONDS = 90
+MIN_OPERATION_TIMEOUT_SECONDS = 30
+MAX_OPERATION_TIMEOUT_SECONDS = 600
 RETRY_BACKOFF_SECONDS = 0.5
 ANUBIS_PASS_PATH = "/.within.website/x/cmd/anubis/api/pass-challenge"
 SUPPORTED_LANGUAGES = {
@@ -369,6 +379,16 @@ def _retry_after_seconds(value):
 class ServiceUnavailable(Subs4FreeError):
     """The upstream service is not currently usable."""
 
+    # Set when the provider's own time budget ran out. The host only sees the class name,
+    # so this never crosses the worker boundary; search uses it to keep partial results.
+    budget_exhausted = False
+
+
+def _budget_exhausted(stage):
+    error = ServiceUnavailable(f"subs4free stage={stage} budget_exhausted")
+    error.budget_exhausted = True
+    return error
+
 
 def is_anubis_challenge(url, status_code=0):
     return "/.within.website/" in (url or "") or (
@@ -432,7 +452,7 @@ def _solve_pow(random_data, difficulty, deadline=None):
     nonce = 0
     while True:
         if deadline is not None and time.monotonic() >= deadline:
-            raise ServiceUnavailable("subs4free Anubis stage=proof_of_work budget_exhausted")
+            raise _budget_exhausted("proof_of_work")
         digest = hashlib.sha256(f"{random_data}{nonce}".encode("utf-8")).hexdigest()
         if digest.startswith(prefix):
             return nonce, digest
@@ -459,7 +479,7 @@ def _renews_identity(url):
 def _remaining(deadline, stage):
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise ServiceUnavailable(f"subs4free Anubis stage={stage} budget_exhausted")
+        raise _budget_exhausted(stage)
     return remaining
 
 
@@ -479,7 +499,7 @@ def _is_timeout(error):
 
 def _budget_sleep(seconds, deadline, stage):
     if seconds >= _remaining(deadline, stage):
-        raise ServiceUnavailable(f"subs4free Anubis stage={stage} budget_exhausted")
+        raise _budget_exhausted(stage)
     time.sleep(seconds)
 
 
@@ -493,6 +513,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 class Subs4FreeProvider:
     def __init__(self):
         self._user_agent = None
+        self._operation_deadline = None
         self._new_identity()
 
     def _new_identity(self):
@@ -515,6 +536,14 @@ class Subs4FreeProvider:
         self._opener = urllib.request.build_opener(cookies)
         self._pass_opener = urllib.request.build_opener(cookies, _NoRedirect())
 
+    @contextlib.contextmanager
+    def _operation_budget(self, config):
+        self._operation_deadline = time.monotonic() + _operation_timeout_seconds(config)
+        try:
+            yield
+        finally:
+            self._operation_deadline = None
+
     def search(self, video, languages, config):
         if (video or {}).get("kind") != "movie":
             return []
@@ -522,21 +551,44 @@ class Subs4FreeProvider:
         requested = {language for language in requested if language in SUPPORTED_LANGUAGES}
         if not requested:
             return []
+        with self._operation_budget(config):
+            return self._search(video, requested, config)
+
+    def _search(self, video, requested, config):
         results = []
         seen = set()
         covered_languages = set()
+        exhausted = None
         for query in build_queries(video):
-            _sleep(config)
-            search_url = _search_url(query)
-            body = self._http_get(search_url, referer=BASE_URL)
-            candidates = parse_search_results(body)
-            candidates.extend(self._candidates_from_suggestions(video, body, config, search_url))
+            candidates = []
+            try:
+                self._collect_candidates(video, query, config, candidates)
+            except ServiceUnavailable as error:
+                if not error.budget_exhausted:
+                    raise
+                exhausted = error
             accepted = _accepted_candidates(video, candidates, requested, seen)
             covered_languages.update(item["language"] for item in accepted)
             results.extend(self._result(video, item) for item in accepted)
-            if requested.issubset(covered_languages):
+            if exhausted or requested.issubset(covered_languages):
                 break
+        if exhausted:
+            if not results:
+                raise exhausted
+            logger.warning("subs4free search ran out of its time budget; returning the %s results found", len(results))
         return sorted(results, key=lambda item: item["score"], reverse=True)
+
+    def _collect_candidates(self, video, query, config, candidates):
+        # Appends as it goes, so rows already parsed survive a budget that runs out later.
+        _sleep(config, self._operation_deadline)
+        search_url = _search_url(query)
+        body = self._http_get(search_url, referer=BASE_URL)
+        candidates.extend(parse_search_results(body))
+        for suggestion in parse_suggestions(body):
+            if not _suggestion_matches(video, suggestion):
+                continue
+            _sleep(config, self._operation_deadline)
+            candidates.extend(parse_search_results(self._http_get(suggestion["url"], referer=search_url)))
 
     def download(self, provider_payload, language, config):
         del language
@@ -544,7 +596,11 @@ class Subs4FreeProvider:
         detail_url = payload.get("detail_url")
         if not detail_url:
             raise ValueError("subs4free download requires detail_url")
-        _sleep(config)
+        with self._operation_budget(config):
+            return self._download(payload, detail_url, config)
+
+    def _download(self, payload, detail_url, config):
+        _sleep(config, self._operation_deadline)
         page = self._http_get(detail_url, referer=BASE_URL)
         form = parse_download_form(page)
         # The legacy "anti-block" calls (images.subs4free.info and two subs4series.com
@@ -555,18 +611,9 @@ class Subs4FreeProvider:
             "x": str(random.randint(0, max(form["width"], 1))),
             "y": str(random.randint(0, max(form["height"], 1))),
         }
-        _sleep(config)
+        _sleep(config, self._operation_deadline)
         body = self._http_post(DOWNLOAD_URL, post_data, referer=detail_url)
         return extract_download(body, payload)
-
-    def _candidates_from_suggestions(self, video, body, config, referer):
-        candidates = []
-        for suggestion in parse_suggestions(body):
-            if not _suggestion_matches(video, suggestion):
-                continue
-            _sleep(config)
-            candidates.extend(parse_search_results(self._http_get(suggestion["url"], referer=referer)))
-        return candidates
 
     def _result(self, video, item):
         alpha3 = item["language"]
@@ -656,6 +703,8 @@ class Subs4FreeProvider:
         # from wherever it happens and is not retried: a new identity cannot make the
         # proof of work cheaper.
         deadline = time.monotonic() + SITE_CALL_BUDGET_SECONDS
+        if self._operation_deadline is not None:
+            deadline = min(deadline, self._operation_deadline)
         try:
             return self._open_attempts(build_request, url, timeout, redir_url, deadline)
         except (TimeoutError, urllib.error.URLError) as error:
@@ -663,7 +712,7 @@ class Subs4FreeProvider:
             # that fires at or past the deadline is the budget running out, not the site.
             if not _is_timeout(error) or time.monotonic() < deadline:
                 raise
-            raise ServiceUnavailable("subs4free Anubis stage=request budget_exhausted") from error
+            raise _budget_exhausted("request") from error
 
     def _open_attempts(self, build_request, url, timeout, redir_url, deadline):
         attempts = CHALLENGE_RETRY_ATTEMPTS if _renews_identity(url) else 1
@@ -781,13 +830,26 @@ def _headers(user_agent, referer=None):
     return headers
 
 
-def _sleep(config):
+def _operation_timeout_seconds(config):
+    try:
+        seconds = int((config or {}).get("operation_timeout_seconds") or DEFAULT_OPERATION_TIMEOUT_SECONDS)
+    except (TypeError, ValueError):
+        seconds = DEFAULT_OPERATION_TIMEOUT_SECONDS
+    return min(max(seconds, MIN_OPERATION_TIMEOUT_SECONDS), MAX_OPERATION_TIMEOUT_SECONDS)
+
+
+def _sleep(config, deadline=None):
     try:
         delay_ms = int((config or {}).get("request_delay_ms") or 0)
     except (TypeError, ValueError):
         delay_ms = 0
-    if delay_ms > 0:
-        time.sleep(min(delay_ms, 5000) / 1000.0)
+    if delay_ms <= 0:
+        return
+    seconds = min(delay_ms, 5000) / 1000.0
+    if deadline is None:
+        time.sleep(seconds)
+    else:
+        _budget_sleep(seconds, deadline, "request_delay")
 
 
 def _release_from_row(row, heading_tag):

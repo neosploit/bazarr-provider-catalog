@@ -879,6 +879,114 @@ class Subs4FreeAnubisTests(unittest.TestCase):
                 with self.assertRaises(type(error)):
                     provider._http_get("https://www.subs4free.info/")
 
+    def test_operation_timeout_comes_from_config_within_bounds(self):
+        for value, expected in ((None, 90), (120, 120), ("150", 150), (5, 30), (10000, 600), ("soon", 90)):
+            with self.subTest(value=value):
+                self.assertEqual(self.mod._operation_timeout_seconds({"operation_timeout_seconds": value}), expected)
+        self.assertEqual(self.mod._operation_timeout_seconds(None), 90)
+
+    def test_download_shares_one_operation_budget_across_site_calls(self):
+        # The detail page takes 80 of the 90 s, so the getSub.php POST gets a timeout clipped
+        # to the 10 s left; when it fires the download reports ServiceUnavailable, before the
+        # host's own wall (90 + 30 s) would kill the worker.
+        clock = [1000.0]
+        timeouts = []
+        provider = self.mod.Subs4FreeProvider()
+
+        def fetch(request, timeout, opener=None):
+            del opener
+            timeouts.append(timeout)
+            if request.get_method() == "POST":
+                clock[0] += timeout
+                raise TimeoutError("The read operation timed out")
+            clock[0] += 80
+            return 200, request.full_url, DOWNLOAD_HTML
+
+        provider._fetch = fetch
+        with mock.patch.object(self.mod.time, "monotonic", lambda: clock[0]):
+            with self.assertRaises(self.mod.ServiceUnavailable) as raised:
+                provider.download(
+                    {"detail_url": "https://www.subs4free.info/greek-subtitles/s3591aab93d/inception"},
+                    {"alpha3": "ell", "alpha2": "el"},
+                    {"request_delay_ms": 0},
+                )
+        self.assertIn("stage=request budget_exhausted", str(raised.exception))
+        self.assertEqual(timeouts, [self.mod.HTTP_TIMEOUT_SECONDS, 10.0])
+        self.assertIsNone(provider._operation_deadline)
+
+    def test_search_returns_results_found_before_the_budget_ran_out(self):
+        # The first query finds Greek only and takes 85 of the 90 s; the English fallback
+        # query runs out. The Greek result is still returned instead of an error.
+        clock = [1000.0]
+        timeouts = []
+        provider = self.mod.Subs4FreeProvider()
+        greek = _html_with_rows([_row("ell", "Inception 2010 Greek Release", "s-ell")])
+
+        def fetch(request, timeout, opener=None):
+            del opener
+            timeouts.append(timeout)
+            if "search=Inception+2010" in request.full_url:
+                clock[0] += 85
+                return 200, request.full_url, greek
+            clock[0] += timeout
+            raise urllib.error.URLError(TimeoutError("timed out"))
+
+        provider._fetch = fetch
+        with mock.patch.object(self.mod.time, "monotonic", lambda: clock[0]):
+            results = provider.search(
+                {"kind": "movie", "title": "Inception", "year": 2010},
+                [{"alpha3": "ell", "alpha2": "el"}, {"alpha3": "eng", "alpha2": "en"}],
+                {"request_delay_ms": 0},
+            )
+        self.assertEqual([item["language"]["alpha3"] for item in results], ["ell"])
+        self.assertEqual(timeouts, [self.mod.HTTP_TIMEOUT_SECONDS, 5.0])
+
+    def test_search_without_results_raises_when_the_budget_runs_out(self):
+        clock = [1000.0]
+        provider = self.mod.Subs4FreeProvider()
+
+        def fetch(request, timeout, opener=None):
+            del timeout, opener
+            clock[0] += 95
+            return 200, request.full_url, _html_with_rows([])
+
+        provider._fetch = fetch
+        with mock.patch.object(self.mod.time, "monotonic", lambda: clock[0]):
+            with self.assertRaises(self.mod.ServiceUnavailable) as raised:
+                provider.search(
+                    {"kind": "movie", "title": "Inception", "year": 2010},
+                    [{"alpha3": "ell", "alpha2": "el"}],
+                    {"request_delay_ms": 0},
+                )
+        self.assertIn("budget_exhausted", str(raised.exception))
+
+    def test_search_keeps_other_service_errors_even_with_results(self):
+        # Only the time budget yields partial results; an unsolvable gate still fails.
+        provider = self.mod.Subs4FreeProvider()
+        greek = _html_with_rows([_row("ell", "Inception 2010 Greek Release", "s-ell")])
+
+        def stub(url, timeout=15, referer=None):
+            del timeout, referer
+            if "search=Inception+2010" in url:
+                return greek
+            raise self.mod.ServiceUnavailable("subs4free Anubis challenge could not be solved after 3 attempts")
+
+        provider._http_get = stub
+        with self.assertRaises(self.mod.ServiceUnavailable) as raised:
+            provider.search(
+                {"kind": "movie", "title": "Inception", "year": 2010},
+                [{"alpha3": "ell", "alpha2": "el"}, {"alpha3": "eng", "alpha2": "en"}],
+                {"request_delay_ms": 0},
+            )
+        self.assertIn("could not be solved", str(raised.exception))
+
+    def test_request_delay_does_not_sleep_past_the_budget(self):
+        with mock.patch.object(self.mod.time, "sleep") as sleep:
+            with self.assertRaises(self.mod.ServiceUnavailable) as raised:
+                self.mod._sleep({"request_delay_ms": 5000}, time.monotonic() + 1)
+        sleep.assert_not_called()
+        self.assertIn("stage=request_delay budget_exhausted", str(raised.exception))
+
     def test_rate_limit_raises(self):
         provider = self.mod.Subs4FreeProvider()
         provider._fetch = lambda request, timeout, opener=None: (429, request.full_url, b"")
