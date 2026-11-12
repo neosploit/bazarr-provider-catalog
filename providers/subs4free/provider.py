@@ -467,6 +467,16 @@ def _request_timeout(timeout, deadline, stage):
     return min(timeout, _remaining(deadline, stage))
 
 
+def _is_timeout(error):
+    # urllib raises a connect timeout as URLError(reason=TimeoutError) and a read timeout
+    # as a bare TimeoutError. HTTPError is a URLError too, but never a timeout.
+    if isinstance(error, urllib.error.HTTPError):
+        return False
+    if isinstance(error, urllib.error.URLError):
+        return isinstance(error.reason, TimeoutError)
+    return isinstance(error, TimeoutError)
+
+
 def _budget_sleep(seconds, deadline, stage):
     if seconds >= _remaining(deadline, stage):
         raise ServiceUnavailable(f"subs4free Anubis stage={stage} budget_exhausted")
@@ -646,6 +656,16 @@ class Subs4FreeProvider:
         # from wherever it happens and is not retried: a new identity cannot make the
         # proof of work cheaper.
         deadline = time.monotonic() + SITE_CALL_BUDGET_SECONDS
+        try:
+            return self._open_attempts(build_request, url, timeout, redir_url, deadline)
+        except (TimeoutError, urllib.error.URLError) as error:
+            # Each request timeout is clipped to what is left of the budget, so a timeout
+            # that fires at or past the deadline is the budget running out, not the site.
+            if not _is_timeout(error) or time.monotonic() < deadline:
+                raise
+            raise ServiceUnavailable("subs4free Anubis stage=request budget_exhausted") from error
+
+    def _open_attempts(self, build_request, url, timeout, redir_url, deadline):
         attempts = CHALLENGE_RETRY_ATTEMPTS if _renews_identity(url) else 1
         for attempt in range(1, attempts + 1):
             status, landed, body = self._fetch(build_request(), _request_timeout(timeout, deadline, "resource_fetch"))

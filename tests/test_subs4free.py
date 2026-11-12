@@ -833,6 +833,52 @@ class Subs4FreeAnubisTests(unittest.TestCase):
         for timeout, left in timeouts:
             self.assertLessEqual(timeout, left)
 
+    def test_request_timeout_at_the_budget_deadline_is_budget_exhaustion(self):
+        # The page takes 50 s of the 60 s budget, so the pass request gets a timeout
+        # clipped to the 10 s left. When it fires, urllib raises a raw timeout (a URLError
+        # on connect, a bare TimeoutError on read); the call must report ServiceUnavailable.
+        for error in (urllib.error.URLError(TimeoutError("timed out")), TimeoutError("The read operation timed out")):
+            with self.subTest(error=type(error).__name__):
+                clock = [1000.0]
+                timeouts = []
+                provider = self.mod.Subs4FreeProvider()
+
+                def fetch(request, timeout, opener=None, error=error):
+                    del opener
+                    timeouts.append(timeout)
+                    if "pass-challenge" in request.full_url:
+                        clock[0] += timeout
+                        raise error
+                    clock[0] += 50
+                    return 200, request.full_url, CHALLENGE_HTML
+
+                provider._fetch = fetch
+                with mock.patch.object(self.mod.time, "monotonic", lambda: clock[0]):
+                    with self.assertRaises(self.mod.ServiceUnavailable) as raised:
+                        provider._http_get("https://www.subs4free.info/")
+                self.assertIn("stage=request budget_exhausted", str(raised.exception))
+                self.assertIs(raised.exception.__cause__, error)
+                self.assertEqual(timeouts, [self.mod.HTTP_TIMEOUT_SECONDS, 10.0])
+
+    def test_network_errors_inside_the_budget_are_not_budget_exhaustion(self):
+        # A timeout with budget left, or any other transport failure, is the site's or
+        # the network's problem and keeps its own type.
+        provider = self.mod.Subs4FreeProvider()
+        for error in (
+            urllib.error.URLError(TimeoutError("timed out")),
+            TimeoutError("The read operation timed out"),
+            urllib.error.URLError(ConnectionRefusedError("refused")),
+        ):
+            with self.subTest(error=repr(error)):
+
+                def fetch(request, timeout, opener=None, error=error):
+                    del request, timeout, opener
+                    raise error
+
+                provider._fetch = fetch
+                with self.assertRaises(type(error)):
+                    provider._http_get("https://www.subs4free.info/")
+
     def test_rate_limit_raises(self):
         provider = self.mod.Subs4FreeProvider()
         provider._fetch = lambda request, timeout, opener=None: (429, request.full_url, b"")
