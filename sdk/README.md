@@ -92,6 +92,7 @@ No wheels, sdists, native files, symlinks, vendored dependencies, or app-environ
 - `bundle_sha256`: deterministic hash over declared Python files.
 - `source`: GitHub repo, ref, commit, catalog path, and trust metadata.
 - `dependencies.requirements`: optional hash-locked PyPI wheels.
+- `anti_captcha`: `true` when the provider can meet a reCAPTCHA (v2 or v3) it needs solved. The host then offers it the user's anti-captcha service, see [Captcha Solving](#captcha-solving).
 
 ## Auth And Settings
 
@@ -149,6 +150,56 @@ Validate each kept endpoint before the first request:
 Use the tag in candidate ids and `provider_payload`, not the URL. Never log a key, a credential, or a response body.
 
 A failed endpoint contributes no results and logs one bounded line with its tag, exception class, and reason. A valid empty response is a success. Raise ConfigurationError before any request when the settings are invalid. Otherwise raise only when every endpoint failed: raise the shared class when all of them failed the same way, and `ServiceUnavailable` otherwise. Raise with `from None` so that transport exceptions do not chain into worker output.
+
+### Captcha Solving
+
+A worker does not inherit Bazarr+'s anti-captcha settings, and it is never given the user's vendor key. Instead, Bazarr+ runs a small solver on the loopback interface and points the provider at it through three config keys:
+
+- `captcha_solver_url`: the solver endpoint, `http://127.0.0.1:<port>/solve`.
+- `captcha_solver_token`: a bearer token for it. Treat it as a secret.
+- `captcha_solver_timeout_ms`: how long one solve may take, `120000`.
+
+The host adds them to the config of a provider whose manifest sets `"anti_captcha": true`, and only when the user has an anti-captcha service set up in Bazarr+ (Anti-Captcha, Death by Captcha, CaptchaAI or 2Captcha). If the user set `captcha_solver_url` or `captcha_response` in the provider's own settings, those are left alone and the host adds nothing. The host also extends the deadline of the worker operation by the solve timeout plus its 30-second margin, so a solve fits inside it. Declaring the three keys in `config_schema` is optional, but it lets a user point the provider at a solver of their own on hosts without this feature.
+
+Request:
+
+```http
+POST /solve
+Authorization: Bearer <captcha_solver_token>
+Content-Type: application/json
+
+{"provider": "myprovider", "site_key": "6Lc...", "site_url": "https://example.org/download/123", "invisible": false}
+```
+
+- `site_key`: the reCAPTCHA site key from the page.
+- `site_url`: the page the captcha is on. `url` is accepted as an alias.
+- `invisible`: `true` for an invisible reCAPTCHA v2. Optional, `false` by default.
+- `provider`: the provider id, used in the host's log.
+- `type`: `recaptcha_v2` or `recaptcha_v3`. Optional, `recaptcha_v2` by default.
+
+A reCAPTCHA v3 has no widget: the page's script calls `grecaptcha.execute(site_key, {action: ...})` and the site grades the token with a score. Send the same action, and the lowest score the site accepts:
+
+```json
+{"provider": "myprovider", "type": "recaptcha_v3", "site_key": "6Lc...", "site_url": "https://example.org/login", "action": "login", "min_score": 0.7}
+```
+
+- `action`: the action name from the page's `grecaptcha.execute` call. Letters, digits, `_` and `/`. Optional, `verify` by default.
+- `min_score`: from `0.1` to `0.9`. Optional, `0.3` by default. Anti-Captcha takes only `0.3`, `0.7` and `0.9`, so the host rounds up to one of them for it.
+
+The body is at most 4 KB. On success the reply is `200 {"token": "<g-recaptcha-response>"}`. Submit a v2 token as the form's `g-recaptcha-response` field, and a v3 token wherever the page's script would put it, often a hidden form field. Any other status carries `{"error": "<reason>"}`:
+
+| Status | Meaning |
+|---|---|
+| 400 | The request is malformed. |
+| 401 | The bearer token is missing or wrong. |
+| 413 | The body is too large. |
+| 429 | Two solves are already running. Try again later, do not wait in a loop. |
+| 502 | The vendor failed or did not solve the captcha. |
+| 503 | No anti-captcha service is configured any more. |
+
+Only reCAPTCHA is solved: v2, visible or invisible, and v3. Any other `type`, such as `hcaptcha`, gets a 400 before it reaches the vendor, and an hCaptcha site key sent without a `type` is taken for a reCAPTCHA v2 and gets a 502. Each solve costs the user money, so ask only when the page really shows a captcha, and ask once per gate. A 429 or a 503 is temporary: raising `APIThrottled` lets the host sit the provider out and retry later, instead of counting a broken download. `_captcha_response` in `providers/subs4series/provider.py` shows the request side.
+
+Hosts without this feature never add the keys, so the provider must still work, or fail clearly, when `captcha_solver_url` is empty.
 
 ## Dependency Locks
 
