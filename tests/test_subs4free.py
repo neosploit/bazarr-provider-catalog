@@ -444,13 +444,16 @@ class Subs4FreeProviderTests(unittest.TestCase):
 
         self.assertEqual(results, [])
 
-    def test_search_applies_candidate_cap_after_language_filtering(self):
+    def test_search_returns_every_matching_row_in_every_requested_language(self):
+        # A movie page lists every subtitle on one page (Avatar 2009 has 79), so nothing
+        # is capped: rows late in page order and the second language must still come back.
         provider = self.mod.Subs4FreeProvider()
         rows = [
             _row("ell", f"Inception 2010 Greek Release {index}", f"s-ell-{index}")
-            for index in range(self.mod.MAX_CANDIDATES_PER_QUERY)
+            for index in range(30)
         ]
         rows.append(_row("eng", "Inception 2010 English Release", "s-eng"))
+        rows.append(_row("ell", "Inception 2010 1080p BluRay x264-SPARKS", "s-ell-sparks"))
         body = _html_with_rows(rows)
 
         def stub(url, timeout=15, referer=None):
@@ -461,13 +464,16 @@ class Subs4FreeProviderTests(unittest.TestCase):
 
         provider._http_get = stub
         results = provider.search(
-            {"kind": "movie", "title": "Inception", "year": 2010},
-            [{"alpha3": "eng", "alpha2": "en"}],
+            {"kind": "movie", "title": "Inception", "year": 2010, "release_group": "SPARKS"},
+            [{"alpha3": "ell", "alpha2": "el"}, {"alpha3": "eng", "alpha2": "en"}],
             {"request_delay_ms": 0},
         )
 
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["language"]["alpha3"], "eng")
+        self.assertEqual(len(results), 32)
+        self.assertEqual(sum(item["language"]["alpha3"] == "eng" for item in results), 1)
+        sparks = [item for item in results if item["release_info"].endswith("SPARKS")]
+        self.assertEqual(len(sparks), 1)
+        self.assertIn("release_group", sparks[0]["matches"])
 
     def test_search_continues_fallback_queries_until_requested_languages_are_covered(self):
         provider = self.mod.Subs4FreeProvider()

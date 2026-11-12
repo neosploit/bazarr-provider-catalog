@@ -41,7 +41,6 @@ CHALLENGE_RETRY_ATTEMPTS = 3
 SITE_CALL_BUDGET_SECONDS = 60
 RETRY_BACKOFF_SECONDS = 0.5
 ANUBIS_PASS_PATH = "/.within.website/x/cmd/anubis/api/pass-challenge"
-MAX_CANDIDATES_PER_QUERY = 20
 SUPPORTED_LANGUAGES = {
     "ell": "el",
     "eng": "en",
@@ -844,8 +843,6 @@ def _accepted_candidates(video, candidates, requested, seen):
             continue
         seen.add(key)
         accepted.append(item)
-        if len(accepted) >= MAX_CANDIDATES_PER_QUERY:
-            break
     return accepted
 
 
