@@ -1,7 +1,7 @@
 {
   "anti_captcha": true,
   "api_version": "bazarr.provider-hub.v1",
-  "bundle_sha256": "10d25cfbd7563a072b24db19e4da7a4be03dde1fb746365529d352ff9cfe1017",
+  "bundle_sha256": "c8ad72e31c40ce25aad0fd0027619cd8ff1e3c9958c1dfd36ce1d5447f66ece7",
   "config_schema": {
     "additionalProperties": false,
     "properties": {
@@ -116,6 +116,13 @@
       },
       {
         "hashes": [
+          "sha256:512f1501d4c8f7d38f0921f48660be7542de1a7b24abb6a6a65324a670150293"
+        ],
+        "name": "babelfish",
+        "version": "0.6.1"
+      },
+      {
+        "hashes": [
           "sha256:072e7624b1fc4d601036ab3f4f27942ef772887e876beff0301d261210bca97f",
           "sha256:67a91c5187e1eec76a61625c77a6c8c785650f5b576ca732bd33ef58b0dff49c",
           "sha256:963a08f3bebd8b75ac57661045402da15991468a621f014be54e50f53a58d19e",
@@ -188,6 +195,13 @@
         ],
         "name": "frozenlist",
         "version": "1.8.0"
+      },
+      {
+        "hashes": [
+          "sha256:3943faf9136a1277b730a08f1212bc17acc5566b94fd689ec561c53260508f00"
+        ],
+        "name": "guessit",
+        "version": "4.5.1"
       },
       {
         "hashes": [
@@ -275,6 +289,20 @@
       },
       {
         "hashes": [
+          "sha256:a5e246f79eb80475e691bf93862cead98decd8a498cf53ba0516fcdc0f50dc1c"
+        ],
+        "name": "python-dateutil",
+        "version": "4.0.0"
+      },
+      {
+        "hashes": [
+          "sha256:3d9b1968f66adb93241d4379e0bc648e3eb965761502938cb44c247aeb358802"
+        ],
+        "name": "rebulk",
+        "version": "6.0.2"
+      },
+      {
+        "hashes": [
           "sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0"
         ],
         "name": "requests",
@@ -300,6 +328,13 @@
         ],
         "name": "typing_extensions",
         "version": "4.15.0"
+      },
+      {
+        "hashes": [
+          "sha256:0a10eec6e13ef16b627fabed9a5f2ba61a62b1c67f327305f4e7e412a70b4aec"
+        ],
+        "name": "tzdata",
+        "version": "2026.6"
       },
       {
         "hashes": [
@@ -341,7 +376,7 @@
   "entry_class": "Subs4SeriesProvider",
   "entry_module": "provider",
   "files": {
-    "provider.py": "b867bc9d23fffa17342b60ae8bff910f018babb17411ad06400c78feb5cbefe7"
+    "provider.py": "ebb3c3d1bdb7aca863cdd3ca778f0ff439d5d12c9d717f3ed1c2c0770d00e333"
   },
   "flaresolverr": true,
   "languages": [
@@ -367,5 +402,5 @@
   "supported_media": [
     "episode"
   ],
-  "version": "0.2.0"
+  "version": "0.2.1"
 }

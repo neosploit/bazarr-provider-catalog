@@ -128,25 +128,55 @@ class Subs4SeriesParserTests(unittest.TestCase):
     def setUp(self):
         self.mod = _load_provider_module()
 
-    def test_episode_markers_read_the_release_name_forms_the_site_uses(self):
+    def test_guess_reads_the_release_name_forms_the_site_uses(self):
         cases = {
-            "Breaking Bad S01E02 720p": (1, 2),
-            "The Office 2x01 - Pilot": (2, 1),
+            "Breaking Bad S01E02 720p": ((1,), (2,)),
+            "The Office 2x01 - Pilot": ((2,), (1,)),
             # Both seen live, where they used to score 75 instead of 100.
-            "The office(BBC) S02-Ep01": (2, 1),
-            "Breaking Bad Season 1 Episode 01 - Pilot-gre": (1, 1),
-            "Lost S03 E10 HDTV": (3, 10),
-            "Lost S3.Ep.10": (3, 10),
-            "Lost season 3 ep 10": (3, 10),
+            "The office(BBC) S02-Ep01": ((2,), (1,)),
+            "Breaking Bad Season 1 Episode 01 - Pilot-gre": ((1,), (1,)),
+            "Lost S03 E10 HDTV": ((3,), (10,)),
+            "Lost S3.Ep.10": ((3,), (10,)),
+            "Lost season 3 ep 10": ((3,), (10,)),
+            # Seen live on the Lost season 1 listing.
+            "Lost Season1-Episode12": ((1,), (12,)),
+            "Lost S01E24-25 - Exodus (2) - HDTV": ((1,), (24, 25)),
+            "Lost Season1-Episode24,25-part2,3": ((1,), (24, 25)),
+            "Lost S01E0 -  - 1080p-CtrlHD": ((1,), (0,)),
+            "Lost S01-S03 720p": ((1, 2, 3), ()),
         }
         for release, expected in cases.items():
             with self.subTest(release=release):
-                self.assertEqual(self.mod._episode_markers(self.mod._normalize(release)), expected)
+                guess = self.mod._guess(release)
+                self.assertEqual((guess.seasons, guess.episodes), expected)
 
-    def test_episode_markers_ignore_numbers_that_are_not_an_episode(self):
-        for release in ("Breaking Bad 1080p x264 DDP5 1", "Breaking Bad Season 1 Complete", "Seasons 1080p", "Sons 2 Ep"):
+    def test_guess_ignores_numbers_that_are_not_an_episode(self):
+        for release in ("Breaking Bad 1080p x264 DDP5 1", "Breaking Bad Season 1 Complete", "Seasons 1080p"):
             with self.subTest(release=release):
-                self.assertEqual(self.mod._episode_markers(self.mod._normalize(release)), (None, None))
+                self.assertEqual(self.mod._guess(release).episodes, ())
+
+    def test_derive_matches_counts_a_double_episode_for_both_episodes(self):
+        video = {"series": "Lost", "season": 1}
+        for episode in (24, 25):
+            with self.subTest(episode=episode):
+                matches = self.mod.derive_matches({**video, "episode": episode}, {"release_info": "Lost S01E24-25 - Exodus (2) - HDTV"})
+                self.assertTrue({"series", "season", "episode"}.issubset(matches))
+
+    def test_derive_matches_reads_source_and_group_as_guessit_names_them(self):
+        release = {"release_info": "Lost S01 DVDRip XviD-WAT [GR]"}
+        self.assertTrue(
+            {"source", "release_group"}.issubset(
+                self.mod.derive_matches({"series": "Lost", "source": "DVD", "release_group": "WAT"}, release)
+            )
+        )
+        web = {"release_info": "Game.of.Thrones.S01E01.720p.WEB-DL.KILLERS"}
+        self.assertTrue(
+            {"source", "release_group"}.issubset(
+                self.mod.derive_matches({"series": "Game of Thrones", "source": "Web", "release_group": "KILLERS"}, web)
+            )
+        )
+        self.assertNotIn("source", self.mod.derive_matches({"series": "Lost", "source": "HDTV"}, release))
+        self.assertNotIn("release_group", self.mod.derive_matches({"series": "Lost", "release_group": "GR"}, web))
 
     def test_parse_suggestions_extracts_show_paths(self):
         rows = self.mod.parse_suggestions(SUGGESTIONS_HTML)
@@ -353,6 +383,27 @@ class Subs4SeriesParserTests(unittest.TestCase):
         self.assertNotIn("member", payload)
         self.assertEqual(payload["episode"], 2)
 
+    def test_extract_download_reads_the_ep_form_of_a_season_pack(self):
+        # The members of the live "Lost S01E0 - - 1080p-CtrlHD" pack.
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w") as archive:
+            for number in range(1, 26):
+                archive.writestr(f"Lost S01 EP{number:02d} 1080p BluRay DTS x264-CtrlHD.srt", f"1\r\nepisode {number}\r\n")
+        payload = {"season": 1, "episode": 1, "release_info": "Lost S01E0 - - 1080p-CtrlHD"}
+
+        self.assertEqual(
+            self.mod.extract_download(stream.getvalue(), payload)["member"],
+            "Lost S01 EP01 1080p BluRay DTS x264-CtrlHD.srt",
+        )
+        payload["episode"] = 12
+        self.assertEqual(
+            self.mod.extract_download(stream.getvalue(), payload)["member"],
+            "Lost S01 EP12 1080p BluRay DTS x264-CtrlHD.srt",
+        )
+        # Episode 26 is not in the pack: defer, and the host fails the download.
+        payload["episode"] = 26
+        self.assertNotIn("member", self.mod.extract_download(stream.getvalue(), payload))
+
     def test_extract_download_rar_defers_to_host_episode_path(self):
         # RAR is not stdlib-listable: always fall back to the host episode path.
         body = b"Rar!\x1a\x07\x00" + b"\x00" * 32
@@ -550,7 +601,7 @@ class Subs4SeriesProviderTests(unittest.TestCase):
             return suggestions_html
 
         provider._http_get = stub
-        return provider._find_show_paths({"kind": "episode", **video}, {}), calls
+        return [path for path, _exact in provider._find_shows({"kind": "episode", **video}, {})], calls
 
     def test_find_show_paths_takes_a_site_title_with_a_country_qualifier(self):
         html = b'<select name="Mov_sel"><option value="/tv-series/shameless-us/s8a71806125">Shameless (US)</option></select>'
@@ -1000,8 +1051,8 @@ class Subs4SeriesProviderTests(unittest.TestCase):
         )
         solved_calls = []
 
-        def fake_solve(active_scraper, challenge_url, original_url, timeout, deadline=None):
-            solved_calls.append((active_scraper, challenge_url, original_url, timeout, deadline - time.monotonic()))
+        def fake_solve(active_scraper, challenge_url, timeout, deadline=None):
+            solved_calls.append((active_scraper, challenge_url, timeout, deadline - time.monotonic()))
             return {"techaro.lol-anubis-auth": "ok"}
 
         with patch.object(self.mod.cloudscraper, "create_scraper", return_value=scraper), patch.object(
@@ -1027,11 +1078,7 @@ class Subs4SeriesProviderTests(unittest.TestCase):
             "https://www.subs4series.com/.within.website/?redir=/search_report.php",
         )
         # The solve gets the call's 60 s budget, not a fresh one.
-        self.assertTrue(55 < solved_calls[0][4] <= self.mod.SITE_CALL_BUDGET_SECONDS)
-        self.assertEqual(
-            solved_calls[0][2],
-            "https://www.subs4series.com/search_report.php?search=Game+of+Thrones&searchType=1",
-        )
+        self.assertTrue(55 < solved_calls[0][3] <= self.mod.SITE_CALL_BUDGET_SECONDS)
 
     def test_http_get_solves_anubis_body_before_retrying_original_url(self):
         provider = self.mod.Subs4SeriesProvider()
@@ -1052,8 +1099,8 @@ class Subs4SeriesProviderTests(unittest.TestCase):
         )
         solved_calls = []
 
-        def fake_solve(active_scraper, challenge_url, original_url, timeout, deadline=None):
-            solved_calls.append((active_scraper, challenge_url, original_url, timeout, deadline - time.monotonic()))
+        def fake_solve(active_scraper, challenge_url, timeout, deadline=None):
+            solved_calls.append((active_scraper, challenge_url, timeout, deadline - time.monotonic()))
             return {"techaro.lol-anubis-auth": "ok"}
 
         with patch.object(self.mod.cloudscraper, "create_scraper", return_value=scraper), patch.object(
@@ -1070,10 +1117,6 @@ class Subs4SeriesProviderTests(unittest.TestCase):
             solved_calls[0][1],
             "https://www.subs4series.com/search_report.php?search=Game+of+Thrones&searchType=1",
         )
-        self.assertEqual(
-            solved_calls[0][2],
-            "https://www.subs4series.com/search_report.php?search=Game+of+Thrones&searchType=1",
-        )
 
     def test_anubis_proof_of_work_stops_at_the_call_budget(self):
         page = FakeScraperResponse(
@@ -1084,7 +1127,7 @@ class Subs4SeriesProviderTests(unittest.TestCase):
 
         with self.assertRaisesRegex(self.mod.ServiceUnavailable, "proof_of_work"):
             self.mod.solve_anubis_challenge(
-                session, "https://www.subs4series.com/.within.website/?redir=/", "https://www.subs4series.com/", deadline=started + 0.2
+                session, "https://www.subs4series.com/.within.website/?redir=/", deadline=started + 0.2
             )
 
         self.assertLess(time.monotonic() - started, 5)
@@ -1098,7 +1141,7 @@ class Subs4SeriesProviderTests(unittest.TestCase):
 
         with patch.object(self.mod.time, "sleep", side_effect=sleeps.append):
             with self.assertRaisesRegex(self.mod.ServiceUnavailable, "pass_submit"):
-                self.mod.solve_anubis_challenge(session, "https://www.subs4series.com/.within.website/?redir=/", "https://www.subs4series.com/")
+                self.mod.solve_anubis_challenge(session, "https://www.subs4series.com/.within.website/?redir=/")
 
         self.assertEqual(sleeps, [])
         self.assertEqual(len(session.calls), 1)
@@ -1110,7 +1153,7 @@ class Subs4SeriesProviderTests(unittest.TestCase):
         session = _AnubisSession([page, FakeScraperResponse(200, {}, b"ok")])
 
         self.mod.solve_anubis_challenge(
-            session, "https://www.subs4series.com/.within.website/?redir=/", "https://www.subs4series.com/", deadline=time.monotonic() + 3
+            session, "https://www.subs4series.com/.within.website/?redir=/", deadline=time.monotonic() + 3
         )
 
         self.assertEqual(len(session.calls), 2)

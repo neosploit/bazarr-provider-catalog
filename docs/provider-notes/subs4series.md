@@ -20,6 +20,7 @@
 - An episode page that answers 404 means that show lacks the episode; the search continues with the next show of the same title.
 - Builds episode URLs as `/tv-series/<show>/season-<season>/episode-<episode>`.
 - Parses `seeDark` and `seeMedium` subtitle rows.
+- Release and zip member names are read with guessit (4.5.1, the provider's own copy in its worker environment) for season, episode, source and release group. It reads every form seen on the site: `S01E01`, `S02-Ep01`, `3x17`, `Season 1 Episode 01`, `Season1-Episode12` (older uploads), `S01 EP01` (zip members of the CtrlHD Lost pack), and double episodes such as `S01E24-25`, which count for both episodes. The source and group compare with the video's, which Bazarr+ reads with guessit too.
 - Maps `el.gif` to Greek and `en.gif` to English.
 - Preserves uploader, download count, year, release info, and episode scoring signals.
 - Runs the same anti-block endpoints before posting the download request.
