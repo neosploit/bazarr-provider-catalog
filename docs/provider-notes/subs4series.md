@@ -20,6 +20,10 @@
 - An episode page that answers 404 means that show lacks the episode; the search continues with the next show of the same title.
 - Builds episode URLs as `/tv-series/<show>/season-<season>/episode-<episode>`.
 - Parses `seeDark` and `seeMedium` subtitle rows.
+- Also offers the season packs of the requested episode's season. An episode page lists only the subtitles filed under that episode, and the site files a pack under episode 0, under no episode, or under whichever episode the uploader picked (all three seen on Lost season 1 in November 2026). So a search also reads the show's season listing (`/season-<season>`, 25 subtitles a page, the second page at `/p-1`), up to 5 pages with the last one always read, since the episode-0 packs sort to the end.
+  - A pack is a release name with a season and no episode (`Lost S01 1080p BluRay x264-CtrlHD`, `Lost Season 1 Complete`, `Lost S01-S03`), or with episode 0 (`Lost S01E0 - - 1080p-CtrlHD`). A misfiled subtitle of another episode or season (`Lost 3x17` on the season 1 listing) is not.
+  - A pack matches the series, season and episode, and is scored like the episode's own subtitles; its payload carries `season_pack: true` and the requested episode, which the worker pins in the zip by the member's season and episode and the host otherwise picks by episode. A pack without that episode fails its download instead of returning another episode.
+  - A season listing that fails to load is logged and leaves the episode's own subtitles in place.
 - Release and zip member names are read with guessit (4.5.1, the provider's own copy in its worker environment) for season, episode, source and release group. It reads every form seen on the site: `S01E01`, `S02-Ep01`, `3x17`, `Season 1 Episode 01`, `Season1-Episode12` (older uploads), `S01 EP01` (zip members of the CtrlHD Lost pack), and double episodes such as `S01E24-25`, which count for both episodes. The source and group compare with the video's, which Bazarr+ reads with guessit too.
 - Maps `el.gif` to Greek and `en.gif` to English.
 - Preserves uploader, download count, year, release info, and episode scoring signals.
