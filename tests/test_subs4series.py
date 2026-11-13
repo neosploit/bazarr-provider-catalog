@@ -128,25 +128,55 @@ class Subs4SeriesParserTests(unittest.TestCase):
     def setUp(self):
         self.mod = _load_provider_module()
 
-    def test_episode_markers_read_the_release_name_forms_the_site_uses(self):
+    def test_guess_reads_the_release_name_forms_the_site_uses(self):
         cases = {
-            "Breaking Bad S01E02 720p": (1, 2),
-            "The Office 2x01 - Pilot": (2, 1),
+            "Breaking Bad S01E02 720p": ((1,), (2,)),
+            "The Office 2x01 - Pilot": ((2,), (1,)),
             # Both seen live, where they used to score 75 instead of 100.
-            "The office(BBC) S02-Ep01": (2, 1),
-            "Breaking Bad Season 1 Episode 01 - Pilot-gre": (1, 1),
-            "Lost S03 E10 HDTV": (3, 10),
-            "Lost S3.Ep.10": (3, 10),
-            "Lost season 3 ep 10": (3, 10),
+            "The office(BBC) S02-Ep01": ((2,), (1,)),
+            "Breaking Bad Season 1 Episode 01 - Pilot-gre": ((1,), (1,)),
+            "Lost S03 E10 HDTV": ((3,), (10,)),
+            "Lost S3.Ep.10": ((3,), (10,)),
+            "Lost season 3 ep 10": ((3,), (10,)),
+            # Seen live on the Lost season 1 listing.
+            "Lost Season1-Episode12": ((1,), (12,)),
+            "Lost S01E24-25 - Exodus (2) - HDTV": ((1,), (24, 25)),
+            "Lost Season1-Episode24,25-part2,3": ((1,), (24, 25)),
+            "Lost S01E0 -  - 1080p-CtrlHD": ((1,), (0,)),
+            "Lost S01-S03 720p": ((1, 2, 3), ()),
         }
         for release, expected in cases.items():
             with self.subTest(release=release):
-                self.assertEqual(self.mod._episode_markers(self.mod._normalize(release)), expected)
+                guess = self.mod._guess(release)
+                self.assertEqual((guess.seasons, guess.episodes), expected)
 
-    def test_episode_markers_ignore_numbers_that_are_not_an_episode(self):
-        for release in ("Breaking Bad 1080p x264 DDP5 1", "Breaking Bad Season 1 Complete", "Seasons 1080p", "Sons 2 Ep"):
+    def test_guess_ignores_numbers_that_are_not_an_episode(self):
+        for release in ("Breaking Bad 1080p x264 DDP5 1", "Breaking Bad Season 1 Complete", "Seasons 1080p"):
             with self.subTest(release=release):
-                self.assertEqual(self.mod._episode_markers(self.mod._normalize(release)), (None, None))
+                self.assertEqual(self.mod._guess(release).episodes, ())
+
+    def test_derive_matches_counts_a_double_episode_for_both_episodes(self):
+        video = {"series": "Lost", "season": 1}
+        for episode in (24, 25):
+            with self.subTest(episode=episode):
+                matches = self.mod.derive_matches({**video, "episode": episode}, {"release_info": "Lost S01E24-25 - Exodus (2) - HDTV"})
+                self.assertTrue({"series", "season", "episode"}.issubset(matches))
+
+    def test_derive_matches_reads_source_and_group_as_guessit_names_them(self):
+        release = {"release_info": "Lost S01 DVDRip XviD-WAT [GR]"}
+        self.assertTrue(
+            {"source", "release_group"}.issubset(
+                self.mod.derive_matches({"series": "Lost", "source": "DVD", "release_group": "WAT"}, release)
+            )
+        )
+        web = {"release_info": "Game.of.Thrones.S01E01.720p.WEB-DL.KILLERS"}
+        self.assertTrue(
+            {"source", "release_group"}.issubset(
+                self.mod.derive_matches({"series": "Game of Thrones", "source": "Web", "release_group": "KILLERS"}, web)
+            )
+        )
+        self.assertNotIn("source", self.mod.derive_matches({"series": "Lost", "source": "HDTV"}, release))
+        self.assertNotIn("release_group", self.mod.derive_matches({"series": "Lost", "release_group": "GR"}, web))
 
     def test_parse_suggestions_extracts_show_paths(self):
         rows = self.mod.parse_suggestions(SUGGESTIONS_HTML)
@@ -352,6 +382,27 @@ class Subs4SeriesParserTests(unittest.TestCase):
         self.assertNotEqual(payload.get("member"), "The.Originals1E02.placeholder.srt")
         self.assertNotIn("member", payload)
         self.assertEqual(payload["episode"], 2)
+
+    def test_extract_download_reads_the_ep_form_of_a_season_pack(self):
+        # The members of the live "Lost S01E0 - - 1080p-CtrlHD" pack.
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w") as archive:
+            for number in range(1, 26):
+                archive.writestr(f"Lost S01 EP{number:02d} 1080p BluRay DTS x264-CtrlHD.srt", f"1\r\nepisode {number}\r\n")
+        payload = {"season": 1, "episode": 1, "release_info": "Lost S01E0 - - 1080p-CtrlHD"}
+
+        self.assertEqual(
+            self.mod.extract_download(stream.getvalue(), payload)["member"],
+            "Lost S01 EP01 1080p BluRay DTS x264-CtrlHD.srt",
+        )
+        payload["episode"] = 12
+        self.assertEqual(
+            self.mod.extract_download(stream.getvalue(), payload)["member"],
+            "Lost S01 EP12 1080p BluRay DTS x264-CtrlHD.srt",
+        )
+        # Episode 26 is not in the pack: defer, and the host fails the download.
+        payload["episode"] = 26
+        self.assertNotIn("member", self.mod.extract_download(stream.getvalue(), payload))
 
     def test_extract_download_rar_defers_to_host_episode_path(self):
         # RAR is not stdlib-listable: always fall back to the host episode path.

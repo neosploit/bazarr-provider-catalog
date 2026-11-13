@@ -1,6 +1,7 @@
 """Subs4Series provider for the Bazarr+ Provider Hub catalog."""
 
 import base64
+import functools
 import hashlib
 import html
 import io
@@ -12,6 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from collections import namedtuple
 from http.cookiejar import CookieJar
 
 try:
@@ -20,6 +22,7 @@ except ImportError:  # pragma: no cover, dependency is declared in provider.json
     cloudscraper = None
 
 import ua_generator
+from guessit import guessit
 from ua_generator.options import Options
 
 
@@ -74,12 +77,6 @@ _FORM_RE = re.compile(r"<form\b[^>]*>", re.I | re.S)
 _WS_RE = re.compile(r"\s+")
 _NON_ALNUM_RE = re.compile(r"[\W_]+", re.UNICODE)
 _YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
-# These run on _normalize()d text, where punctuation is a space: "S02-Ep01" reads "s02 ep01".
-_SXXEXX_RE = re.compile(r"\bs0*(?P<season>\d{1,2}) ?ep? ?0*(?P<episode>\d{1,3})\b", re.I)
-_X_EPISODE_RE = re.compile(r"\b0*(?P<season>\d{1,2})x0*(?P<episode>\d{1,3})\b", re.I)
-_SEASON_EPISODE_WORDS_RE = re.compile(
-    r"\bseason 0*(?P<season>\d{1,2}) (?:episode|ep) 0*(?P<episode>\d{1,3})\b", re.I
-)
 _META_REFRESH_RE = re.compile(
     r"""<meta\s+http-equiv=["']refresh["']\s+content=["'](?P<delay>\d+);\s*url=(?P<url>[^"']+)["']""",
     re.I,
@@ -274,27 +271,15 @@ def _member_release_score(name, release_tokens):
 
 
 def _member_matches_episode(name, season, episode):
-    # Tolerate separated SxxExx tokens (S01.E02, S01 E02, S01-E02) as well as contiguous
-    # S01E02; keep (?!\d) so "e02" never matches "e020". The (?<![a-z0-9]) left boundary
-    # stops the "s" of a title word (e.g. "Originals1E02") from being read as the season
-    # marker -- without it a placeholder member is pinned and the host hard-fails or
-    # delivers the wrong subtitle.
-    text = (name or "").lower()
-    if re.search(rf"(?<![a-z0-9])s0*{season}[\s._-]*e0*{episode}(?!\d)", text):
-        return True
-    if re.search(rf"(?<![a-z0-9]){season}x0*{episode}(?!\d)", text):
-        return True
-    # Whole-token NNN form (e.g. S07E20 written as "720"): compare against delimited tokens
-    # so "720" never matches inside "720p" and "264" never matches "x264".
-    compact = f"{season}{episode:02d}"
-    return compact in _tokens(name)
+    # guessit reads every form seen in packs: S01E02, S01.E02, "S01 EP01" (the CtrlHD Lost
+    # pack), 1x02, the compact 102, and leaves "720p" and "Originals1E02" alone. A member
+    # without a season, as the host's own pick does, counts for any season.
+    guess = _guess(name)
+    return episode in guess.episodes and (not guess.seasons or season in guess.seasons)
 
 
 def _member_has_episode_marker(name):
-    text = (name or "").lower()
-    if re.search(r"s\d{1,2}[\s._-]*e\d{1,3}", text) or re.search(r"(?<!\d)\d{1,2}x\d{1,3}", text):
-        return True
-    return any(token.isdigit() and len(token) == 3 for token in _tokens(name))
+    return bool(_guess(name).episodes)
 
 
 def _safe_int(value):
@@ -321,25 +306,31 @@ def derive_matches(video, item, show_matched=False):
     series_tokens = _tokens(video.get("series"))
     if show_matched or (series_tokens and all(token in normalized.split() for token in series_tokens)):
         matches.append("series")
-    season, episode = _episode_markers(normalized)
+    guess = _guess(release)
     try:
         video_season = int(video.get("season"))
         video_episode = int(video.get("episode"))
     except (TypeError, ValueError):
         video_season = video_episode = None
-    if video_season is not None and season == video_season:
+    # A double episode, "S01E24-25", is a subtitle of both.
+    if video_season is not None and video_season in guess.seasons:
         matches.append("season")
-    if video_episode is not None and episode == video_episode:
+    if video_episode is not None and video_episode in guess.episodes:
         matches.append("episode")
     title_tokens = _tokens(video.get("title"))
     if title_tokens and all(token in normalized.split() for token in title_tokens):
         matches.append("title")
     if video.get("year") and str(video.get("year")) in normalized.split():
         matches.append("year")
-    if _matches_token(video.get("source"), normalized):
+    # Bazarr+ reads the video's source and group with guessit too, so the names compare.
+    source = _normalize_release_group(video.get("source"))
+    if source and source == _normalize_release_group(guess.source):
         matches.append("source")
-    release_group = _coerce_text(video.get("release_group"))
-    if release_group and _normalize_release_group(release_group) in _normalize_release_group(release):
+    release_group = _normalize_release_group(video.get("release_group"))
+    # "WAT [GR]" is the WAT group's Greek subtitle.
+    if release_group and (
+        release_group == _normalize_release_group(guess.release_group) or release_group in _tokens(guess.release_group)
+    ):
         matches.append("release_group")
     return matches
 
@@ -1151,8 +1142,7 @@ def _year_from_row(row):
 
 
 def _series_from_release(release):
-    cleaned = re.split(r"\bs\d{1,2}e\d{1,3}\b|\b\d{1,2}x\d{1,3}\b", release or "", maxsplit=1, flags=re.I)[0]
-    return cleaned.strip(" -._") or None
+    return _guess(release).title
 
 
 def _direct_download_target(text):
@@ -1285,29 +1275,32 @@ def _normalize_release_group(value):
     return re.sub(r"[^a-z0-9]+", "", (_coerce_text(value) or "").lower())
 
 
-def _episode_markers(normalized):
-    for pattern in (_SXXEXX_RE, _X_EPISODE_RE, _SEASON_EPISODE_WORDS_RE):
-        match = pattern.search(normalized or "")
-        if match:
-            return int(match.group("season")), int(match.group("episode"))
-    return None, None
+_Guess = namedtuple("_Guess", "title seasons episodes source release_group")
 
 
-def _matches_token(value, normalized_text):
-    if not _coerce_text(value):
-        return False
-    token = _normalize(value)
-    if token in normalized_text.split():
-        return True
-    aliases = {
-        "blu ray": {"bluray", "brrip", "bdrip"},
-        "bluray": {"bluray", "brrip", "bdrip"},
-        "web": {"web", "webdl", "webrip"},
-        "web dl": {"webdl", "web"},
-        "webrip": {"webrip", "web"},
-        "hdtv": {"hdtv"},
-    }
-    return bool(aliases.get(token, set()) & set(normalized_text.split()))
+@functools.lru_cache(maxsize=4096)
+def _guess(name):
+    """What guessit reads from a release or file name; seasons and episodes as tuples.
+
+    Cached: a search reads up to a few hundred names, and a show's names repeat across its
+    episodes' searches in the same worker.
+    """
+    try:
+        guess = guessit(_coerce_text(name), {"type": "episode"})
+    except Exception:  # guessit gives up on some malformed names; read them as nothing
+        return _Guess(None, (), (), None, None)
+    return _Guess(
+        _coerce_text(guess.get("title")) or None,
+        _int_tuple(guess.get("season")),
+        _int_tuple(guess.get("episode")),
+        _coerce_text(guess.get("source")) or None,
+        _coerce_text(guess.get("release_group")) or None,
+    )
+
+
+def _int_tuple(value):
+    values = value if isinstance(value, list) else [value]
+    return tuple(number for number in (_safe_int(item) for item in values) if number is not None)
 
 
 def _alpha3_for_language(language):
